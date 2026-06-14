@@ -8,7 +8,11 @@ from dataclasses import dataclass
 
 from .residual_gating import ResidualGateDecision, decide_residual_gate
 from .residual_reroot import extract_residual_path
-from .residual_surrogate import ResidualDDTree, build_residual_ddtree, estimate_residual_gain
+from .residual_surrogate import (
+    ResidualDDTree,
+    build_residual_ddtree,
+    estimate_residual_gain,
+)
 from .residual_types import CandidateSource, ResidualCandidate, ResidualPath
 
 
@@ -71,6 +75,7 @@ def build_residual_opportunity(
     target_seconds: float,
     residual_budget: int,
     residual_candidate_groups: Sequence[Sequence[ResidualCandidate]] | None = None,
+    residual_target_seconds: float | None = None,
 ) -> ResidualOpportunity:
     """Build and gate a residual opportunity without invoking the drafter.
 
@@ -100,6 +105,7 @@ def build_residual_opportunity(
         draft_seconds=draft_seconds,
         target_seconds=target_seconds,
         estimated_residual_gain=estimated_gain,
+        residual_target_seconds=residual_target_seconds,
     )
     return ResidualOpportunity(
         path=path,

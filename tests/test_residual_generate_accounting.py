@@ -62,6 +62,24 @@ def test_build_residual_opportunity_uses_residual_ddtree_when_candidate_groups_e
     assert opportunity.should_run is True
 
 
+def test_build_residual_opportunity_passes_explicit_residual_target_cost() -> None:
+    opportunity = build_residual_opportunity(
+        block_token_ids=(100, 11, 22, 33),
+        block_probabilities=(1.0, 0.9, 0.8, 0.7),
+        start_position=10,
+        acceptance_length=1,
+        verifier_mismatch_token_id=99,
+        current_accepted=1,
+        draft_seconds=1.0,
+        target_seconds=2.0,
+        residual_budget=1,
+        residual_target_seconds=0.5,
+    )
+
+    assert opportunity.gate.target_seconds == 2.0
+    assert opportunity.gate.residual_target_seconds == 0.5
+
+
 def test_build_residual_opportunity_can_gate_off() -> None:
     opportunity = build_residual_opportunity(
         block_token_ids=(100, 11, 22, 33),
@@ -112,6 +130,10 @@ def test_dflash_generate_uses_residual_tail_without_second_draft_call() -> None:
     assert "residual_gate_records" in source
     assert "measured_draft_seconds" in source
     assert "measured_target_seconds" in source
+    assert "target_seconds_sum" in source
+    assert "target_seconds_count" in source
+    assert "residual_target_seconds_estimate" in source
+    assert "residual_target_seconds" in source
     assert "prefix_hidden" in source
     assert "residual_hidden" in source
     assert "torch.cat" in source

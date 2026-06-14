@@ -126,6 +126,8 @@ def dflash_generate(
     residual_runs = 0
     start = num_input_tokens
     draft_prefill = True
+    target_seconds_sum = 0.0
+    target_seconds_count = 0
 
     while start < max_length:
         block_output_ids = output_ids[:, start : start + block_size].clone()
@@ -195,6 +197,16 @@ def dflash_generate(
         )
         if target_start is not None:
             measured_target_seconds = _cuda_time() - target_start
+        current_target_seconds = float(measured_target_seconds or 1e-9)
+        residual_target_seconds_estimate = (
+            float(residual_target_seconds)
+            if residual_target_seconds is not None
+            else (
+                target_seconds_sum / target_seconds_count
+                if target_seconds_count > 0
+                else current_target_seconds
+            )
+        )
 
         posterior = sample(output.logits, temperature)
         acceptance_length = (
@@ -218,7 +230,7 @@ def dflash_generate(
                     ),
                     current_accepted=int(acceptance_length + 1),
                     draft_seconds=float(measured_draft_seconds or 1e-9),
-                    target_seconds=float(measured_target_seconds or 1e-9),
+                    target_seconds=current_target_seconds,
                     residual_budget=residual_budget,
                     residual_candidate_groups=build_residual_candidate_groups(
                         top_token_ids_by_block=residual_top_token_ids[
@@ -230,6 +242,7 @@ def dflash_generate(
                         start_position=int(start),
                         first_block_index=int(acceptance_length + 2),
                     ),
+                    residual_target_seconds=residual_target_seconds_estimate,
                 )
             except NoResidualOpportunity:
                 opportunity = None
@@ -255,6 +268,9 @@ def dflash_generate(
                         "tree_nodes": int(opportunity.tree_nodes),
                         "draft_seconds": float(opportunity.gate.draft_seconds),
                         "target_seconds": float(opportunity.gate.target_seconds),
+                        "residual_target_seconds": float(
+                            opportunity.gate.residual_target_seconds
+                        ),
                     }
                 )
 
@@ -320,6 +336,10 @@ def dflash_generate(
                         target_hidden = torch.cat(
                             [prefix_hidden, residual_hidden], dim=1
                         )
+
+        if enable_residual and residual_target_seconds is None:
+            target_seconds_sum += current_target_seconds
+            target_seconds_count += 1
 
         if not residual_ran:
             output_ids[:, start : start + acceptance_length + 1] = block_output_ids[
