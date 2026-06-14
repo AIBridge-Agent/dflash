@@ -1,0 +1,24 @@
+{
+  "venvPath": "../..",
+  "venv": ".venv",
+  "include": [
+    "dflash",
+    "tests"
+  ],
+  "executionEnvironments": [
+    {
+      "root": ".",
+      "extraPaths": [
+        "."
+      ]
+    }
+  ],
+  "reportMissingImports": "none",
+  "reportMissingModuleSource": "none",
+  "reportOptionalIterable": "none",
+  "reportOperatorIssue": "none",
+  "reportPossiblyUnboundVariable": "none",
+  "reportGeneralTypeIssues": "none",
+  "reportOptionalOperand": "none",
+  "reportReturnType": "none"
+}

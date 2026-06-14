@@ -1,7 +1,9 @@
+# pyright: reportMissingImports=none, reportOptionalIterable=none, reportArgumentType=none
 from __future__ import annotations
 
 import argparse
 import json
+from contextlib import suppress
 import os
 import random
 import re
@@ -29,17 +31,29 @@ DATASETS = {
     "gsm8k": {
         "load_args": ("openai/gsm8k", "main"),
         "load_kwargs": {"split": "test"},
-        "format": lambda x: "{question}\nPlease reason step by step, and put your final answer within \\boxed{{}}.".format(**x),
+        "format": lambda x: (
+            "{question}\nPlease reason step by step, and put your final answer within \\boxed{{}}.".format(
+                **x
+            )
+        ),
     },
     "math500": {
         "load_args": ("HuggingFaceH4/MATH-500",),
         "load_kwargs": {"split": "test"},
-        "format": lambda x: "{problem}\nPlease reason step by step, and put your final answer within \\boxed{{}}.".format(**x),
+        "format": lambda x: (
+            "{problem}\nPlease reason step by step, and put your final answer within \\boxed{{}}.".format(
+                **x
+            )
+        ),
     },
     "humaneval": {
         "load_args": ("openai/openai_humaneval",),
         "load_kwargs": {"split": "test"},
-        "format": lambda x: "Write a solution to the following problem and make sure that it passes the tests:\n```python\n{prompt}\n```".format(**x),
+        "format": lambda x: (
+            "Write a solution to the following problem and make sure that it passes the tests:\n```python\n{prompt}\n```".format(
+                **x
+            )
+        ),
     },
     "mbpp": {
         "load_args": ("google-research-datasets/mbpp", "sanitized"),
@@ -83,7 +97,9 @@ def _prepare_dataset(name: str) -> Path:
 
 def load_and_process_dataset(data_name: str) -> list[dict]:
     if data_name not in DATASETS:
-        raise ValueError(f"Unknown dataset '{data_name}'. Available: {list(DATASETS.keys())}")
+        raise ValueError(
+            f"Unknown dataset '{data_name}'. Available: {list(DATASETS.keys())}"
+        )
 
     path = CACHE_DIR / f"{data_name}.jsonl"
     if not path.exists():
@@ -109,26 +125,39 @@ def _apply_chat_template(tokenizer, messages: list[dict], enable_thinking: bool)
     )
 
 
-def _make_decode_metrics(num_output_tokens: int, generation_tps: float, acceptance_lengths: list[int]) -> SimpleNamespace:
+def _make_decode_metrics(
+    num_output_tokens: int, generation_tps: float, acceptance_lengths: list[int]
+) -> SimpleNamespace:
     return SimpleNamespace(
         num_output_tokens=num_output_tokens,
-        time_per_output_token=1.0 / generation_tps if generation_tps > 0 else float("inf"),
+        time_per_output_token=1.0 / generation_tps
+        if generation_tps > 0
+        else float("inf"),
         acceptance_lengths=acceptance_lengths,
     )
 
 
-def _print_decode_summary(responses: list[dict[int, SimpleNamespace]], block_size: int) -> None:
+def _print_decode_summary(
+    responses: list[dict[int, SimpleNamespace]], block_size: int
+) -> None:
     baseline_tpot = np.mean([r[1].time_per_output_token for r in responses])
     dflash_tpot = np.mean([r[block_size].time_per_output_token for r in responses])
     print(f"Baseline throughput: {1 / baseline_tpot:.2f} tok/s")
     print(f"DFlash throughput:  {1 / dflash_tpot:.2f} tok/s")
     print(f"Decoding speedup: {baseline_tpot / dflash_tpot:.2f}")
 
-    mean_accept = np.mean([np.mean(r[block_size].acceptance_lengths) for r in responses])
+    mean_accept = np.mean(
+        [np.mean(r[block_size].acceptance_lengths) for r in responses]
+    )
     print(f"Average Acceptance length: {mean_accept:.2f}")
 
-    acceptance_lengths = list(chain.from_iterable(r[block_size].acceptance_lengths for r in responses))
-    histogram = [acceptance_lengths.count(b) / len(acceptance_lengths) for b in range(block_size + 1)]
+    acceptance_lengths = list(
+        chain.from_iterable(r[block_size].acceptance_lengths for r in responses)
+    )
+    histogram = [
+        acceptance_lengths.count(b) / len(acceptance_lengths)
+        for b in range(block_size + 1)
+    ]
     print(f"Acceptance length histogram: {[f'{x * 100:.1f}%' for x in histogram]}")
 
 
@@ -138,7 +167,9 @@ def _env_int(name: str, default: int) -> int:
 
 def _dist_init(torch_dist) -> None:
     if "RANK" not in os.environ:
-        warnings.warn("RANK not set. Skipping distributed initialization.")
+        warnings.warn(
+            "RANK not set. Skipping distributed initialization.", stacklevel=2
+        )
         return
     torch_dist.init_process_group(backend="nccl", init_method="env://")
 
@@ -170,7 +201,9 @@ def _dist_gather(torch_dist, obj: Any, dst: int = 0):
     return None
 
 
-_TRANSFORMERS_SUPPORTED_PATTERN = re.compile(r"qwen3(?!\.5)[\w-]*|llama.*3\.1.*8b.*instruct", re.IGNORECASE)
+_TRANSFORMERS_SUPPORTED_PATTERN = re.compile(
+    r"qwen3(?!\.5)[\w-]*|llama.*3\.1.*8b.*instruct", re.IGNORECASE
+)
 
 
 def _check_transformers_model(model_name: str) -> None:
@@ -185,6 +218,7 @@ def _check_transformers_model(model_name: str) -> None:
 def _get_transformers_attn_impl() -> str:
     try:
         import flash_attn  # noqa: F401
+
         return "flash_attention_2"
     except ImportError:
         logger.warning(
@@ -216,15 +250,29 @@ def _run_transformers(args: argparse.Namespace) -> None:
     device = torch.device(f"cuda:{_dist_local_rank()}")
     attn_impl = _get_transformers_attn_impl()
 
-    target = AutoModelForCausalLM.from_pretrained(
-        args.model, attn_implementation=attn_impl, dtype=torch.bfloat16,
-    ).to(device).eval()
+    target = (
+        AutoModelForCausalLM.from_pretrained(
+            args.model,
+            attn_implementation=attn_impl,
+            dtype=torch.bfloat16,
+        )
+        .to(device)
+        .eval()
+    )
 
-    draft_model = DFlashDraftModel.from_pretrained(
-        args.draft_model, attn_implementation=attn_impl, dtype=torch.bfloat16,
-    ).to(device).eval()
+    draft_model = (
+        DFlashDraftModel.from_pretrained(
+            args.draft_model,
+            attn_implementation=attn_impl,
+            dtype=torch.bfloat16,
+        )
+        .to(device)
+        .eval()
+    )
 
-    block_size = args.block_size if args.block_size is not None else draft_model.block_size
+    block_size = (
+        args.block_size if args.block_size is not None else draft_model.block_size
+    )
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     dataset = load_and_process_dataset(args.dataset)
 
@@ -238,7 +286,9 @@ def _run_transformers(args: argparse.Namespace) -> None:
         for user_content in instance["turns"]:
             messages.append({"role": "user", "content": user_content})
             input_text = _apply_chat_template(tokenizer, messages, args.enable_thinking)
-            input_ids = tokenizer.encode(input_text, return_tensors="pt").to(target.device)
+            input_ids = tokenizer.encode(input_text, return_tensors="pt").to(
+                target.device
+            )
 
             response = {}
             for bs in [1, block_size]:
@@ -251,10 +301,17 @@ def _run_transformers(args: argparse.Namespace) -> None:
                     temperature=args.temperature,
                     block_size=bs,
                     return_stats=True,
+                    enable_residual=args.enable_residual,
+                    residual_budget=args.residual_budget,
+                    residual_tree_width=args.residual_tree_width,
+                    residual_draft_seconds=args.residual_draft_seconds,
+                    residual_target_seconds=args.residual_target_seconds,
                 )
 
             spec_response = response[block_size]
-            generated_ids = spec_response.output_ids[0, spec_response.num_input_tokens:]
+            generated_ids = spec_response.output_ids[
+                0, spec_response.num_input_tokens :
+            ]
             output_text = tokenizer.decode(generated_ids, skip_special_tokens=True)
             messages.append({"role": "assistant", "content": output_text})
             responses.append(response)
@@ -338,14 +395,20 @@ def _run_mlx(args: argparse.Namespace) -> None:
     model, tokenizer = load(args.model)
     logger.info(f"Loading draft: {args.draft_model}")
     draft = load_draft(args.draft_model)
-    block_size = args.block_size if args.block_size is not None else int(draft.config.block_size)
+    block_size = (
+        args.block_size if args.block_size is not None else int(draft.config.block_size)
+    )
 
     dataset = load_and_process_dataset(args.dataset)
     dataset = _limit_dataset(dataset, args.max_samples)
 
     warmup_prompt = tokenizer.encode("Hi")
     list(stream_generate_baseline(model, tokenizer, warmup_prompt, 3, sampler=sampler))
-    list(stream_generate(model, draft, tokenizer, warmup_prompt, block_size, 3, sampler=sampler))
+    list(
+        stream_generate(
+            model, draft, tokenizer, warmup_prompt, block_size, 3, sampler=sampler
+        )
+    )
 
     responses = []
     for idx in tqdm(range(len(dataset))):
@@ -358,13 +421,23 @@ def _run_mlx(args: argparse.Namespace) -> None:
             response = {}
 
             tokens_bl, tps_bl = [], 0
-            for r in stream_generate_baseline(model, tokenizer, prompt, args.max_new_tokens, sampler=sampler):
+            for r in stream_generate_baseline(
+                model, tokenizer, prompt, args.max_new_tokens, sampler=sampler
+            ):
                 tokens_bl.append(r.token)
                 tps_bl = r.generation_tps
             response[1] = _make_decode_metrics(len(tokens_bl), tps_bl, [1])
 
             tokens_df, accs, tps_df = [], [], 0
-            for r in stream_generate(model, draft, tokenizer, prompt, block_size, args.max_new_tokens, sampler=sampler):
+            for r in stream_generate(
+                model,
+                draft,
+                tokenizer,
+                prompt,
+                block_size,
+                args.max_new_tokens,
+                sampler=sampler,
+            ):
                 tokens_df.extend(r.tokens)
                 accs.append(r.accepted)
                 tps_df = r.generation_tps
@@ -394,11 +467,13 @@ def _run_server(args: argparse.Namespace) -> None:
         if is_vllm:
             prompts.append(user_content)
         else:
-            prompts.append(_apply_chat_template(
-                tokenizer,
-                [{"role": "user", "content": user_content}],
-                args.enable_thinking,
-            ))
+            prompts.append(
+                _apply_chat_template(
+                    tokenizer,
+                    [{"role": "user", "content": user_content}],
+                    args.enable_thinking,
+                )
+            )
 
     def send_one(prompt: str) -> dict:
         if is_vllm:
@@ -436,7 +511,9 @@ def _run_server(args: argparse.Namespace) -> None:
             list(pool.map(send_one, prompts[:bs]))
         prompts = prompts[bs:]
 
-    print(f"Running benchmark: {args.num_prompts} prompts, concurrency={args.concurrency} ...")
+    print(
+        f"Running benchmark: {args.num_prompts} prompts, concurrency={args.concurrency} ..."
+    )
     start = time.perf_counter()
     total_tokens = 0
     spec_verify_ct_sum = 0
@@ -454,10 +531,8 @@ def _run_server(args: argparse.Namespace) -> None:
                 total_tokens += int(meta.get("completion_tokens", 0))
                 spec_verify_ct_sum += int(meta.get("spec_verify_ct", 0))
                 if "spec_accept_length" in meta:
-                    try:
+                    with suppress(TypeError, ValueError):
                         spec_accept_lengths.append(float(meta["spec_accept_length"]))
-                    except (TypeError, ValueError):
-                        pass
 
     latency = time.perf_counter() - start
     toks_per_s = total_tokens / max(latency, 1e-6)
@@ -479,7 +554,9 @@ def _run_server(args: argparse.Namespace) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="DFlash benchmark")
-    parser.add_argument("--backend", choices=["transformers", "sglang", "vllm", "mlx"], required=True)
+    parser.add_argument(
+        "--backend", choices=["transformers", "sglang", "vllm", "mlx"], required=True
+    )
     parser.add_argument("--model", type=str, required=True)
     parser.add_argument("--dataset", type=str, required=True)
     parser.add_argument("--max-new-tokens", type=int, default=2048)
@@ -488,6 +565,11 @@ def main() -> None:
     parser.add_argument("--draft-model", type=str, default=None)
     parser.add_argument("--block-size", type=int, default=None)
     parser.add_argument("--max-samples", type=int, default=None)
+    parser.add_argument("--enable-residual", action="store_true")
+    parser.add_argument("--residual-budget", type=int, default=64)
+    parser.add_argument("--residual-tree-width", type=int, default=4)
+    parser.add_argument("--residual-draft-seconds", type=float, default=None)
+    parser.add_argument("--residual-target-seconds", type=float, default=None)
 
     parser.add_argument("--base-url", type=str, default="http://127.0.0.1:30000")
     parser.add_argument("--num-prompts", type=int, default=1024)
@@ -499,7 +581,10 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    assert not (args.enable_thinking and any(x in args.model.lower() for x in ["qwen3-4b", "qwen3-8b"])), (
+    assert not (
+        args.enable_thinking
+        and any(x in args.model.lower() for x in ["qwen3-4b", "qwen3-8b"])
+    ), (
         "DFlash draft models for Qwen3-4B and Qwen3-8B were not trained with thinking traces. "
         "Using --enable-thinking will lead to suboptimal performance."
     )

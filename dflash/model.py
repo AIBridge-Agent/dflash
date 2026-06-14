@@ -1,7 +1,8 @@
+# pyright: reportMissingImports=none, reportOptionalIterable=none, reportOperatorIssue=none, reportPossiblyUnboundVariable=none, reportGeneralTypeIssues=none, reportOptionalOperand=none, reportReturnType=none
 import time
 import torch
 from types import SimpleNamespace
-from typing import Callable, Optional
+from typing import Callable
 from typing_extensions import Unpack
 from torch import nn
 from transformers.models.qwen3.modeling_qwen3 import (
@@ -20,9 +21,16 @@ from transformers import DynamicCache
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.cache_utils import Cache
 
+from .residual_errors import NoResidualOpportunity
+from .residual_generate import (
+    build_residual_candidate_groups,
+    build_residual_opportunity,
+)
+
 # ---------------------------------------------------------------------------
 # Model utilities
 # ---------------------------------------------------------------------------
+
 
 def build_target_layer_ids(num_target_layers: int, num_draft_layers: int):
     if num_draft_layers == 1:
@@ -38,7 +46,7 @@ def build_target_layer_ids(num_target_layers: int, num_draft_layers: int):
 
 def extract_context_feature(
     hidden_states: list[torch.Tensor],
-    layer_ids: Optional[list[int]],
+    layer_ids: list[int] | None,
 ) -> torch.Tensor:
     offset = 1
     selected_states = [hidden_states[layer_id + offset] for layer_id in layer_ids]
@@ -65,11 +73,16 @@ def dflash_generate(
     target: nn.Module,
     input_ids: torch.LongTensor,
     max_new_tokens: int,
-    stop_token_ids: Optional[list[int]],
+    stop_token_ids: list[int] | None,
     temperature: float,
-    block_size: Optional[int] = None,
-    mask_token_id: Optional[int] = None,
+    block_size: int | None = None,
+    mask_token_id: int | None = None,
     return_stats: bool = False,
+    enable_residual: bool = False,
+    residual_budget: int = 1,
+    residual_tree_width: int = 4,
+    residual_draft_seconds: float | None = None,
+    residual_target_seconds: float | None = None,
 ):
     num_input_tokens = input_ids.shape[1]
     max_length = num_input_tokens + max_new_tokens
@@ -77,7 +90,10 @@ def dflash_generate(
     mask_token_id = model.mask_token_id if mask_token_id is None else mask_token_id
 
     output_ids = torch.full(
-        (1, max_length + block_size), mask_token_id, dtype=torch.long, device=target.device,
+        (1, max_length + block_size),
+        mask_token_id,
+        dtype=torch.long,
+        device=target.device,
     )
     position_ids = torch.arange(output_ids.shape[1], device=target.device).unsqueeze(0)
     past_key_values_target = DynamicCache()
@@ -94,35 +110,82 @@ def dflash_generate(
     )
 
     output_ids[:, :num_input_tokens] = input_ids
-    output_ids[:, num_input_tokens:num_input_tokens + 1] = sample(output.logits, temperature)
+    output_ids[:, num_input_tokens : num_input_tokens + 1] = sample(
+        output.logits, temperature
+    )
     if block_size > 1:
-        target_hidden = extract_context_feature(output.hidden_states, model.target_layer_ids)
+        target_hidden = extract_context_feature(
+            output.hidden_states, model.target_layer_ids
+        )
     time_to_first_token = _cuda_time() - prefill_start if return_stats else None
 
     decode_start = _cuda_time() if return_stats else None
     acceptance_lengths = []
+    residual_attempts = []
+    residual_gate_records = []
+    residual_runs = 0
     start = num_input_tokens
     draft_prefill = True
 
     while start < max_length:
         block_output_ids = output_ids[:, start : start + block_size].clone()
         block_position_ids = position_ids[:, start : start + block_size]
+        block_probabilities = [1.0]
+        residual_top_token_ids = ()
+        residual_top_probabilities = ()
+        measured_draft_seconds = residual_draft_seconds
+        measured_target_seconds = residual_target_seconds
         if block_size > 1:
             noise_embedding = target.model.embed_tokens(block_output_ids)
-            draft_logits = target.lm_head(model(
-                target_hidden=target_hidden,
-                noise_embedding=noise_embedding,
-                position_ids=position_ids[:, past_key_values_draft.get_seq_length(): start + block_size],
-                past_key_values=past_key_values_draft,
-                use_cache=True,
-                is_causal=False,
-            )[:, 1 - block_size :, :])
+            draft_start = (
+                _cuda_time()
+                if enable_residual and residual_draft_seconds is None
+                else None
+            )
+            draft_logits = target.lm_head(
+                model(
+                    target_hidden=target_hidden,
+                    noise_embedding=noise_embedding,
+                    position_ids=position_ids[
+                        :, past_key_values_draft.get_seq_length() : start + block_size
+                    ],
+                    past_key_values=past_key_values_draft,
+                    use_cache=True,
+                    is_causal=False,
+                )[:, 1 - block_size :, :]
+            )
+            if draft_start is not None:
+                measured_draft_seconds = _cuda_time() - draft_start
             past_key_values_draft.crop(start)
-            block_output_ids[:, 1:] = sample(draft_logits)
+            sampled_draft_ids = sample(draft_logits)
+            block_output_ids[:, 1:] = sampled_draft_ids
+            if enable_residual:
+                draft_probs = torch.softmax(draft_logits, dim=-1)
+                sampled_probs = torch.gather(
+                    draft_probs, -1, sampled_draft_ids.unsqueeze(-1)
+                ).squeeze(-1)
+                block_probabilities = [1.0] + [
+                    float(x) for x in sampled_probs[0].detach().cpu().tolist()
+                ]
+                topk = min(int(residual_tree_width), int(draft_probs.shape[-1]))
+                top_probs, top_ids = torch.topk(draft_probs, k=topk, dim=-1)
+                residual_top_token_ids = tuple(
+                    tuple(int(x) for x in row)
+                    for row in top_ids[0].detach().cpu().tolist()
+                )
+                residual_top_probabilities = tuple(
+                    tuple(float(x) for x in row)
+                    for row in top_probs[0].detach().cpu().tolist()
+                )
             if draft_prefill and return_stats:
                 draft_prefill = False
                 decode_start = _cuda_time()
 
+        target_start = (
+            _cuda_time()
+            if enable_residual and residual_target_seconds is None
+            else None
+        )
         output = target(
             block_output_ids,
             position_ids=block_position_ids,
@@ -130,27 +193,162 @@ def dflash_generate(
             use_cache=True,
             output_hidden_states=block_size > 1,
         )
+        if target_start is not None:
+            measured_target_seconds = _cuda_time() - target_start
 
         posterior = sample(output.logits, temperature)
-        acceptance_length = (block_output_ids[:, 1:] == posterior[:, :-1]).cumprod(dim=1).sum(dim=1)[0].item()
-        output_ids[:, start : start + acceptance_length + 1] = block_output_ids[:, : acceptance_length + 1]
-        output_ids[:, start + acceptance_length + 1] = posterior[:, acceptance_length]
-        start += acceptance_length + 1
-        past_key_values_target.crop(start)
-        acceptance_lengths.append(acceptance_length + 1)
+        acceptance_length = (
+            (block_output_ids[:, 1:] == posterior[:, :-1])
+            .cumprod(dim=1)
+            .sum(dim=1)[0]
+            .item()
+        )
+        residual_ran = False
+        if enable_residual and block_size > 2 and acceptance_length < block_size - 1:
+            try:
+                opportunity = build_residual_opportunity(
+                    block_token_ids=tuple(
+                        int(x) for x in block_output_ids[0].detach().cpu().tolist()
+                    ),
+                    block_probabilities=tuple(block_probabilities),
+                    start_position=int(start),
+                    acceptance_length=int(acceptance_length),
+                    verifier_mismatch_token_id=int(
+                        posterior[0, acceptance_length].detach().cpu().item()
+                    ),
+                    current_accepted=int(acceptance_length + 1),
+                    draft_seconds=float(measured_draft_seconds or 1e-9),
+                    target_seconds=float(measured_target_seconds or 1e-9),
+                    residual_budget=residual_budget,
+                    residual_candidate_groups=build_residual_candidate_groups(
+                        top_token_ids_by_block=residual_top_token_ids[
+                            acceptance_length + 1 :
+                        ],
+                        top_probabilities_by_block=residual_top_probabilities[
+                            acceptance_length + 1 :
+                        ],
+                        start_position=int(start),
+                        first_block_index=int(acceptance_length + 2),
+                    ),
+                )
+            except NoResidualOpportunity:
+                opportunity = None
 
-        if block_size > 1:
-            target_hidden = extract_context_feature(output.hidden_states, model.target_layer_ids)[:, :acceptance_length + 1, :]
+            if opportunity is not None:
+                residual_attempts.append(opportunity)
+                residual_gate_records.append(
+                    {
+                        "start": int(start),
+                        "acceptance_length": int(acceptance_length),
+                        "current_accepted": int(acceptance_length + 1),
+                        "estimated_residual_gain": float(
+                            opportunity.estimated_residual_gain
+                        ),
+                        "baseline_throughput": float(
+                            opportunity.gate.baseline_throughput
+                        ),
+                        "predicted_residual_throughput": float(
+                            opportunity.gate.predicted_residual_throughput
+                        ),
+                        "should_run": bool(opportunity.should_run),
+                        "reason": opportunity.gate.reason,
+                        "tree_nodes": int(opportunity.tree_nodes),
+                        "draft_seconds": float(opportunity.gate.draft_seconds),
+                        "target_seconds": float(opportunity.gate.target_seconds),
+                    }
+                )
+
+            if opportunity is not None and opportunity.should_run:
+                mismatch_block_index = acceptance_length + 1
+                residual_tail = block_output_ids[:, mismatch_block_index + 1 :]
+                if residual_tail.shape[1] > 0:
+                    residual_ran = True
+                    residual_runs += 1
+                    output_ids[:, start : start + acceptance_length + 1] = (
+                        block_output_ids[:, : acceptance_length + 1]
+                    )
+                    output_ids[:, start + acceptance_length + 1] = posterior[
+                        :, acceptance_length
+                    ]
+                    past_key_values_target.crop(start + acceptance_length + 1)
+                    residual_ids = torch.cat(
+                        [
+                            posterior[:, acceptance_length : acceptance_length + 1],
+                            residual_tail,
+                        ],
+                        dim=1,
+                    )
+                    residual_position_ids = position_ids[
+                        :, start + mismatch_block_index : start + block_size
+                    ]
+                    residual_output = target(
+                        residual_ids,
+                        position_ids=residual_position_ids,
+                        past_key_values=past_key_values_target,
+                        use_cache=True,
+                        output_hidden_states=block_size > 1,
+                    )
+                    residual_posterior = sample(residual_output.logits, temperature)
+                    residual_acceptance_length = (
+                        (residual_ids[:, 1:] == residual_posterior[:, :-1])
+                        .cumprod(dim=1)
+                        .sum(dim=1)[0]
+                        .item()
+                    )
+                    residual_start = start + acceptance_length + 1
+                    output_ids[
+                        :,
+                        residual_start : residual_start
+                        + residual_acceptance_length
+                        + 1,
+                    ] = residual_ids[:, : residual_acceptance_length + 1]
+                    output_ids[:, residual_start + residual_acceptance_length + 1] = (
+                        residual_posterior[:, residual_acceptance_length]
+                    )
+                    start += acceptance_length + residual_acceptance_length + 2
+                    past_key_values_target.crop(start)
+                    acceptance_lengths.append(
+                        acceptance_length + residual_acceptance_length + 2
+                    )
+                    if block_size > 1:
+                        prefix_hidden = extract_context_feature(
+                            output.hidden_states, model.target_layer_ids
+                        )[:, : acceptance_length + 1, :]
+                        residual_hidden = extract_context_feature(
+                            residual_output.hidden_states, model.target_layer_ids
+                        )[:, : residual_acceptance_length + 1, :]
+                        target_hidden = torch.cat(
+                            [prefix_hidden, residual_hidden], dim=1
+                        )
+
+        if not residual_ran:
+            output_ids[:, start : start + acceptance_length + 1] = block_output_ids[
+                :, : acceptance_length + 1
+            ]
+            output_ids[:, start + acceptance_length + 1] = posterior[
+                :, acceptance_length
+            ]
+            start += acceptance_length + 1
+            past_key_values_target.crop(start)
+            acceptance_lengths.append(acceptance_length + 1)
+
+            if block_size > 1:
+                target_hidden = extract_context_feature(
+                    output.hidden_states, model.target_layer_ids
+                )[:, : acceptance_length + 1, :]
 
         if stop_token_ids is not None and any(
-            stop_token_id in output_ids[:, num_input_tokens:] for stop_token_id in stop_token_ids
+            stop_token_id in output_ids[:, num_input_tokens:]
+            for stop_token_id in stop_token_ids
         ):
             break
 
-    output_ids = output_ids[:, :min(start + 1, max_length)]
+    output_ids = output_ids[:, : min(start + 1, max_length)]
     if stop_token_ids is not None:
         stop_token_ids = torch.tensor(stop_token_ids, device=output_ids.device)
-        stop_token_indices = torch.isin(output_ids[0][num_input_tokens:], stop_token_ids).nonzero(as_tuple=True)[0]
+        stop_token_indices = torch.isin(
+            output_ids[0][num_input_tokens:], stop_token_ids
+        ).nonzero(as_tuple=True)[0]
         if stop_token_indices.numel() > 0:
             output_ids = output_ids[:, : num_input_tokens + stop_token_indices[0] + 1]
 
@@ -166,12 +364,16 @@ def dflash_generate(
         time_to_first_token=time_to_first_token,
         time_per_output_token=total_decode_time / num_output_tokens,
         acceptance_lengths=acceptance_lengths,
+        residual_attempts=residual_attempts,
+        residual_gate_records=residual_gate_records,
+        residual_runs=residual_runs,
     )
 
 
 # ---------------------------------------------------------------------------
 # DFlash model
 # ---------------------------------------------------------------------------
+
 
 def apply_rotary_pos_emb(q, k, cos, sin, unsqueeze_dim=1):
     cos = cos.unsqueeze(unsqueeze_dim)
@@ -187,37 +389,53 @@ class Qwen3DFlashAttention(nn.Module):
         super().__init__()
         self.config = config
         self.layer_idx = layer_idx
-        self.head_dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
-        self.num_key_value_groups = config.num_attention_heads // config.num_key_value_heads
+        self.head_dim = getattr(
+            config, "head_dim", config.hidden_size // config.num_attention_heads
+        )
+        self.num_key_value_groups = (
+            config.num_attention_heads // config.num_key_value_heads
+        )
         self.scaling = self.head_dim**-0.5
         self.attention_dropout = config.attention_dropout
         self.is_causal = False
         self.q_proj = nn.Linear(
-            config.hidden_size, config.num_attention_heads * self.head_dim, bias=config.attention_bias
+            config.hidden_size,
+            config.num_attention_heads * self.head_dim,
+            bias=config.attention_bias,
         )
         self.k_proj = nn.Linear(
-            config.hidden_size, config.num_key_value_heads * self.head_dim, bias=config.attention_bias
+            config.hidden_size,
+            config.num_key_value_heads * self.head_dim,
+            bias=config.attention_bias,
         )
         self.v_proj = nn.Linear(
-            config.hidden_size, config.num_key_value_heads * self.head_dim, bias=config.attention_bias
+            config.hidden_size,
+            config.num_key_value_heads * self.head_dim,
+            bias=config.attention_bias,
         )
         self.o_proj = nn.Linear(
-            config.num_attention_heads * self.head_dim, config.hidden_size, bias=config.attention_bias
+            config.num_attention_heads * self.head_dim,
+            config.hidden_size,
+            bias=config.attention_bias,
         )
         self.q_norm = Qwen3RMSNorm(self.head_dim, eps=config.rms_norm_eps)
         self.k_norm = Qwen3RMSNorm(self.head_dim, eps=config.rms_norm_eps)
-        self.sliding_window = config.sliding_window if config.layer_types[layer_idx] == "sliding_attention" else None
+        self.sliding_window = (
+            config.sliding_window
+            if config.layer_types[layer_idx] == "sliding_attention"
+            else None
+        )
 
     def forward(
         self,
         hidden_states: torch.Tensor,
         target_hidden: torch.Tensor,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
-        attention_mask: Optional[torch.Tensor],
-        past_key_values: Optional[Cache] = None,
-        cache_position: Optional[torch.LongTensor] = None,
+        attention_mask: torch.Tensor | None,
+        past_key_values: Cache | None = None,
+        cache_position: torch.LongTensor | None = None,
         **kwargs: Unpack[FlashAttentionKwargs],
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         bsz, q_len = hidden_states.shape[:-1]
         ctx_len = target_hidden.shape[1]
         q = self.q_proj(hidden_states)
@@ -227,8 +445,12 @@ class Qwen3DFlashAttention(nn.Module):
         k_noise = self.k_proj(hidden_states)
         v_ctx = self.v_proj(target_hidden)
         v_noise = self.v_proj(hidden_states)
-        k = torch.cat([k_ctx, k_noise], dim=1).view(bsz, ctx_len + q_len, -1, self.head_dim)
-        v = torch.cat([v_ctx, v_noise], dim=1).view(bsz, ctx_len + q_len, -1, self.head_dim)
+        k = torch.cat([k_ctx, k_noise], dim=1).view(
+            bsz, ctx_len + q_len, -1, self.head_dim
+        )
+        v = torch.cat([v_ctx, v_noise], dim=1).view(
+            bsz, ctx_len + q_len, -1, self.head_dim
+        )
         k = self.k_norm(k).transpose(1, 2)
         v = v.transpose(1, 2)
         cos, sin = position_embeddings
@@ -262,21 +484,23 @@ class Qwen3DFlashDecoderLayer(GradientCheckpointingLayer):
         self.self_attn = Qwen3DFlashAttention(config=config, layer_idx=layer_idx)
         self.mlp = Qwen3MLP(config)
         self.input_layernorm = Qwen3RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.post_attention_layernorm = Qwen3RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_attention_layernorm = Qwen3RMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps
+        )
 
     def forward(
         self,
-        target_hidden: Optional[torch.Tensor] = None,
-        hidden_states: Optional[torch.Tensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        past_key_value: Optional[Cache] = None,
-        output_attentions: Optional[bool] = False,
-        use_cache: Optional[bool] = False,
-        cache_position: Optional[torch.LongTensor] = None,
-        position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
+        target_hidden: torch.Tensor | None = None,
+        hidden_states: torch.Tensor | None = None,
+        attention_mask: torch.Tensor | None = None,
+        position_ids: torch.LongTensor | None = None,
+        past_key_value: Cache | None = None,
+        output_attentions: bool | None = False,
+        use_cache: bool | None = False,
+        cache_position: torch.LongTensor | None = None,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,
         **kwargs: Unpack[FlashAttentionKwargs],
-    ) -> tuple[torch.FloatTensor, Optional[tuple[torch.FloatTensor, torch.FloatTensor]]]:
+    ) -> tuple[torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None]:
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
         hidden_states = self.self_attn(
@@ -307,14 +531,22 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
         super().__init__(config)
         self.config = config
         self.layers = nn.ModuleList(
-            [Qwen3DFlashDecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
+            [
+                Qwen3DFlashDecoderLayer(config, layer_idx)
+                for layer_idx in range(config.num_hidden_layers)
+            ]
         )
         self.target_layer_ids = self.config.dflash_config.get(
-            "target_layer_ids", build_target_layer_ids(config.num_target_layers, config.num_hidden_layers)
+            "target_layer_ids",
+            build_target_layer_ids(config.num_target_layers, config.num_hidden_layers),
         )
         self.norm = Qwen3RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.rotary_emb = Qwen3RotaryEmbedding(config)
-        self.fc = nn.Linear(len(self.target_layer_ids) * config.hidden_size, config.hidden_size, bias=False)
+        self.fc = nn.Linear(
+            len(self.target_layer_ids) * config.hidden_size,
+            config.hidden_size,
+            bias=False,
+        )
         self.hidden_norm = Qwen3RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.block_size = config.block_size
         self.mask_token_id = self.config.dflash_config.get("mask_token_id", None)
@@ -323,10 +555,10 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
     def forward(
         self,
         position_ids: torch.LongTensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        noise_embedding: Optional[torch.Tensor] = None,
-        target_hidden: Optional[torch.Tensor] = None,
-        past_key_values: Optional[Cache] = None,
+        attention_mask: torch.Tensor | None = None,
+        noise_embedding: torch.Tensor | None = None,
+        target_hidden: torch.Tensor | None = None,
+        past_key_values: Cache | None = None,
         use_cache: bool = False,
         **kwargs,
     ) -> CausalLMOutputWithPast:

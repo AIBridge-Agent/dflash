@@ -1,0 +1,29 @@
+model: Qwen/Qwen3-8B
+draft_model: z-lab/Qwen3-8B-DFlash-b16
+backend: transformers
+dataset: gsm8k
+hf_dataset: openai/gsm8k
+hf_dataset_config: main
+hf_dataset_split: test
+hf_dataset_schema_verified: true
+hf_dataset_features:
+  question: string
+  answer: string
+hardware: single_a100
+block_size: 16
+max_samples: 128
+max_new_tokens: 2048
+temperature: 0.0
+enable_residual: true
+residual_budget: 64
+residual_tree_width: 4
+residual_draft_seconds: measured
+residual_target_seconds: measured
+fair_eval:
+  policy_order_mode: alternate_by_sample
+  tail_record_detail: minimal
+  require_no_gpu_contention: true
+  clear_cuda_policy_cache: true
+notes:
+  - "GSM8K schema inspected via hf_dataset_info: question:string, answer:string; test split has 1319 examples."
+  - "Residual mode must reuse already-sampled DFlash block tail with no extra drafter pass."
