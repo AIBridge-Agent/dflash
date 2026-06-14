@@ -76,6 +76,9 @@ def build_residual_opportunity(
     residual_budget: int,
     residual_candidate_groups: Sequence[Sequence[ResidualCandidate]] | None = None,
     residual_target_seconds: float | None = None,
+    residual_gain_scale: float = 1.0,
+    residual_min_gain: float = 0.0,
+    residual_min_margin: float = 0.0,
 ) -> ResidualOpportunity:
     """Build and gate a residual opportunity without invoking the drafter.
 
@@ -106,6 +109,9 @@ def build_residual_opportunity(
         target_seconds=target_seconds,
         estimated_residual_gain=estimated_gain,
         residual_target_seconds=residual_target_seconds,
+        residual_gain_scale=residual_gain_scale,
+        min_residual_gain=residual_min_gain,
+        min_throughput_margin=residual_min_margin,
     )
     return ResidualOpportunity(
         path=path,

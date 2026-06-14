@@ -45,6 +45,36 @@ def test_zero_current_acceptance_can_still_trigger() -> None:
     assert decision.should_run is True
 
 
+def test_gate_applies_gain_calibration_and_margin() -> None:
+    decision = decide_residual_gate(
+        current_accepted=1,
+        draft_seconds=1.0,
+        target_seconds=1.0,
+        estimated_residual_gain=4.0,
+        residual_gain_scale=0.5,
+        min_residual_gain=3.0,
+        min_throughput_margin=0.2,
+    )
+
+    assert decision.should_run is False
+    assert decision.reason == "insufficient_estimated_gain"
+    assert decision.effective_estimated_residual_gain == pytest.approx(2.0)
+
+
+def test_gate_requires_minimum_throughput_margin() -> None:
+    decision = decide_residual_gate(
+        current_accepted=10,
+        draft_seconds=1.0,
+        target_seconds=1.0,
+        estimated_residual_gain=6.0,
+        min_residual_gain=1.0,
+        min_throughput_margin=0.5,
+    )
+
+    assert decision.should_run is False
+    assert decision.reason == "predicted_not_profitable"
+
+
 def test_invalid_timing_denominator_is_rejected() -> None:
     with pytest.raises(InvalidAccountingError):
         decide_residual_gate(

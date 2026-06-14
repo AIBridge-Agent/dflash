@@ -112,6 +112,9 @@ def run_policy(
     max_new_tokens: int,
     residual_budget: int,
     residual_tree_width: int,
+    residual_gain_scale: float,
+    residual_min_gain: float,
+    residual_min_margin: float,
 ) -> dict[str, Any]:
     reset_gpu_state()
     enable_residual = policy == "dflash_block16_residual"
@@ -128,11 +131,16 @@ def run_policy(
         enable_residual=enable_residual,
         residual_budget=residual_budget,
         residual_tree_width=residual_tree_width,
+        residual_gain_scale=residual_gain_scale,
+        residual_min_gain=residual_min_gain,
+        residual_min_margin=residual_min_margin,
     )
     torch.cuda.synchronize()
     wall_seconds = time.perf_counter() - start
     gate_records = list(getattr(stats, "residual_gate_records", []))
-    gate_off_records = [record for record in gate_records if not record.get("should_run", False)]
+    gate_off_records = [
+        record for record in gate_records if not record.get("should_run", False)
+    ]
     row = {
         "policy": policy,
         "output_tokens": int(stats.num_output_tokens),
@@ -145,10 +153,19 @@ def run_policy(
         "gate_off_count": len(gate_off_records),
         "mean_delta_hat": _mean_gate_field(gate_records, "estimated_residual_gain"),
         "mean_theta_base": _mean_gate_field(gate_records, "baseline_throughput"),
-        "mean_theta_res_hat": _mean_gate_field(gate_records, "predicted_residual_throughput"),
+        "mean_theta_res_hat": _mean_gate_field(
+            gate_records, "predicted_residual_throughput"
+        ),
+        "mean_effective_delta_hat": _mean_gate_field(
+            gate_records, "effective_estimated_residual_gain"
+        ),
+        "mean_t_res": _mean_gate_field(gate_records, "residual_target_seconds"),
         "mean_tree_nodes": _mean_gate_field(gate_records, "tree_nodes"),
         "residual_budget": residual_budget,
         "residual_tree_width": residual_tree_width,
+        "residual_gain_scale": residual_gain_scale,
+        "residual_min_gain": residual_min_gain,
+        "residual_min_margin": residual_min_margin,
         "peak_memory_mib": float(torch.cuda.max_memory_allocated() / 1024 / 1024),
     }
     del stats
@@ -201,6 +218,17 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
                 )
                 if policy_rows
                 else 0.0,
+                "mean_effective_delta_hat": statistics.fmean(
+                    float(row.get("mean_effective_delta_hat", 0.0))
+                    for row in policy_rows
+                )
+                if policy_rows
+                else 0.0,
+                "mean_t_res": statistics.fmean(
+                    float(row.get("mean_t_res", 0.0)) for row in policy_rows
+                )
+                if policy_rows
+                else 0.0,
                 "mean_tree_nodes": statistics.fmean(
                     float(row.get("mean_tree_nodes", 0.0)) for row in policy_rows
                 )
@@ -222,6 +250,9 @@ def main() -> None:
     parser.add_argument("--max-new-tokens", type=int, default=256)
     parser.add_argument("--residual-budget", type=int, default=64)
     parser.add_argument("--residual-tree-width", type=int, default=4)
+    parser.add_argument("--residual-gain-scale", type=float, default=0.6)
+    parser.add_argument("--residual-min-gain", type=float, default=3.0)
+    parser.add_argument("--residual-min-margin", type=float, default=0.2)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--output-dir", type=Path, default=Path("results/residual_fair_benchmark")
@@ -273,6 +304,9 @@ def main() -> None:
                         max_new_tokens=args.max_new_tokens,
                         residual_budget=args.residual_budget,
                         residual_tree_width=args.residual_tree_width,
+                        residual_gain_scale=args.residual_gain_scale,
+                        residual_min_gain=args.residual_min_gain,
+                        residual_min_margin=args.residual_min_margin,
                     )
                     row.update(
                         {
@@ -282,6 +316,9 @@ def main() -> None:
                             "max_new_tokens": args.max_new_tokens,
                             "residual_budget": args.residual_budget,
                             "residual_tree_width": args.residual_tree_width,
+                            "residual_gain_scale": args.residual_gain_scale,
+                            "residual_min_gain": args.residual_min_gain,
+                            "residual_min_margin": args.residual_min_margin,
                             "fairness": {
                                 "paired_prompt": True,
                                 "cuda_cache_reset_before_each_policy": True,

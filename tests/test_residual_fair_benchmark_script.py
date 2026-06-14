@@ -46,3 +46,8 @@ def test_fair_benchmark_logs_gate_diagnostics() -> None:
     assert "mean_delta_hat" in source
     assert "mean_theta_base" in source
     assert "mean_theta_res_hat" in source
+    assert "mean_effective_delta_hat" in source
+    assert "mean_t_res" in source
+    assert "residual_gain_scale" in source
+    assert "residual_min_gain" in source
+    assert "residual_min_margin" in source

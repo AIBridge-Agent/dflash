@@ -49,5 +49,8 @@ python -m dflash.benchmark \
   --block-size 16 \
   --enable-residual \
   --residual-budget 64 \
-  --residual-tree-width 4
+  --residual-tree-width 4 \
+  --residual-gain-scale 0.6 \
+  --residual-min-gain 3.0 \
+  --residual-min-margin 0.2
 COMMANDS

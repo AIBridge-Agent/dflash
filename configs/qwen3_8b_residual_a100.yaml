@@ -17,6 +17,9 @@ temperature: 0.0
 enable_residual: true
 residual_budget: 64
 residual_tree_width: 4
+residual_gain_scale: 0.6
+residual_min_gain: 3.0
+residual_min_margin: 0.2
 residual_draft_seconds: measured
 residual_target_seconds: measured
 fair_eval:

@@ -81,6 +81,9 @@ def dflash_generate(
     enable_residual: bool = False,
     residual_budget: int = 1,
     residual_tree_width: int = 4,
+    residual_gain_scale: float = 0.6,
+    residual_min_gain: float = 3.0,
+    residual_min_margin: float = 0.2,
     residual_draft_seconds: float | None = None,
     residual_target_seconds: float | None = None,
 ):
@@ -243,6 +246,9 @@ def dflash_generate(
                         first_block_index=int(acceptance_length + 2),
                     ),
                     residual_target_seconds=residual_target_seconds_estimate,
+                    residual_gain_scale=residual_gain_scale,
+                    residual_min_gain=residual_min_gain,
+                    residual_min_margin=residual_min_margin,
                 )
             except NoResidualOpportunity:
                 opportunity = None
@@ -257,6 +263,9 @@ def dflash_generate(
                         "estimated_residual_gain": float(
                             opportunity.estimated_residual_gain
                         ),
+                        "effective_estimated_residual_gain": float(
+                            opportunity.gate.effective_estimated_residual_gain
+                        ),
                         "baseline_throughput": float(
                             opportunity.gate.baseline_throughput
                         ),
@@ -270,6 +279,13 @@ def dflash_generate(
                         "target_seconds": float(opportunity.gate.target_seconds),
                         "residual_target_seconds": float(
                             opportunity.gate.residual_target_seconds
+                        ),
+                        "residual_gain_scale": float(
+                            opportunity.gate.residual_gain_scale
+                        ),
+                        "residual_min_gain": float(opportunity.gate.min_residual_gain),
+                        "residual_min_margin": float(
+                            opportunity.gate.min_throughput_margin
                         ),
                     }
                 )

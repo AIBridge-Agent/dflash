@@ -304,6 +304,9 @@ def _run_transformers(args: argparse.Namespace) -> None:
                     enable_residual=args.enable_residual,
                     residual_budget=args.residual_budget,
                     residual_tree_width=args.residual_tree_width,
+                    residual_gain_scale=args.residual_gain_scale,
+                    residual_min_gain=args.residual_min_gain,
+                    residual_min_margin=args.residual_min_margin,
                     residual_draft_seconds=args.residual_draft_seconds,
                     residual_target_seconds=args.residual_target_seconds,
                 )
@@ -568,6 +571,9 @@ def main() -> None:
     parser.add_argument("--enable-residual", action="store_true")
     parser.add_argument("--residual-budget", type=int, default=64)
     parser.add_argument("--residual-tree-width", type=int, default=4)
+    parser.add_argument("--residual-gain-scale", type=float, default=0.6)
+    parser.add_argument("--residual-min-gain", type=float, default=3.0)
+    parser.add_argument("--residual-min-margin", type=float, default=0.2)
     parser.add_argument("--residual-draft-seconds", type=float, default=None)
     parser.add_argument("--residual-target-seconds", type=float, default=None)
 

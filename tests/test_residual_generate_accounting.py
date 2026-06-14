@@ -109,6 +109,9 @@ def test_dflash_generate_exposes_residual_opt_in_flags() -> None:
     assert "residual_budget" in arg_names
     assert "residual_draft_seconds" in arg_names
     assert "residual_target_seconds" in arg_names
+    assert "residual_gain_scale" in arg_names
+    assert "residual_min_gain" in arg_names
+    assert "residual_min_margin" in arg_names
 
 
 def test_dflash_generate_does_not_swallow_domain_errors() -> None:
@@ -134,6 +137,10 @@ def test_dflash_generate_uses_residual_tail_without_second_draft_call() -> None:
     assert "target_seconds_count" in source
     assert "residual_target_seconds_estimate" in source
     assert "residual_target_seconds" in source
+    assert "residual_gain_scale" in source
+    assert "residual_min_gain" in source
+    assert "residual_min_margin" in source
+    assert "effective_estimated_residual_gain" in source
     assert "prefix_hidden" in source
     assert "residual_hidden" in source
     assert "torch.cat" in source
