@@ -77,9 +77,7 @@ def decide_residual_gate(
     predicted = (
         current_accepted + effective_estimated_residual_gain
     ) / residual_denominator
-    if effective_estimated_residual_gain < min_residual_gain:
-        reason = "insufficient_estimated_gain"
-    elif predicted <= baseline * (1.0 + min_throughput_margin):
+    if predicted <= baseline * (1.0 + min_throughput_margin):
         reason = "predicted_not_profitable"
     else:
         reason = "predicted_improvement"

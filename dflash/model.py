@@ -117,8 +117,8 @@ def dflash_generate(
     enable_primary_ddtree: bool = False,
     residual_budget: int = 128,
     residual_tree_width: int = 5,
-    residual_gain_scale: float = 0.6,
-    residual_min_gain: float = 3.0,
+    residual_gain_scale: float = 1.0,
+    residual_min_gain: float = 0.0,
     residual_min_margin: float = 0.2,
     residual_draft_seconds: float | None = None,
     residual_target_seconds: float | None = None,
@@ -407,7 +407,9 @@ def dflash_generate(
                     residual_effective_gain_sum += (
                         residual_gate.effective_estimated_residual_gain
                     )
-                    residual_baseline_throughput_sum += residual_gate.baseline_throughput
+                    residual_baseline_throughput_sum += (
+                        residual_gate.baseline_throughput
+                    )
                     residual_predicted_throughput_sum += (
                         residual_gate.predicted_residual_throughput
                     )

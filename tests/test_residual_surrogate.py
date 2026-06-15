@@ -70,8 +70,8 @@ def test_depth_mass_eal_uses_topk_mass_without_tree_materialization() -> None:
         ResidualCandidate(4, 12, 0.25, CandidateSource.DRAFT_TAIL, 2),
     )
 
-    # EAL = (0.4 + 0.3) + (0.4 + 0.3) * (0.5 + 0.25).
-    assert estimate_depth_mass_eal((depth1, depth2)) == pytest.approx(1.225)
+    # EAL = 1 bonus token + (0.4 + 0.3) + (0.4 + 0.3) * (0.5 + 0.25).
+    assert estimate_depth_mass_eal((depth1, depth2)) == pytest.approx(2.225)
 
 
 def test_residual_ddtree_expected_accept_length_sums_tree_prefix_nodes() -> None:

@@ -19,8 +19,8 @@ python scripts/a100/run_fair_residual_benchmark.py \
 	--max-new-tokens 256 \
 	--residual-budget 128 \
 	--residual-tree-width 5 \
-	--residual-gain-scale 0.6 \
-	--residual-min-gain 3.0 \
+	--residual-gain-scale 1.0 \
+	--residual-min-gain 0.0 \
 	--residual-min-margin 0.2 \
 	--residual-draft-seconds 0.0078 \
 	--residual-target-seconds 0.0520 \

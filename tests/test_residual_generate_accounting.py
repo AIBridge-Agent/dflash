@@ -56,8 +56,8 @@ def test_build_residual_opportunity_uses_depth_mass_eal_when_candidate_groups_ex
 
     assert opportunity.residual_tree is None
     assert opportunity.tree_nodes == 0
-    # EAL = (0.95 + 0.5 clipped to 1.0) + 1.0 * (0.9 + 0.4 clipped to 1.0).
-    assert opportunity.estimated_residual_gain == 2.0
+    # EAL = 1 bonus token + (0.95 + 0.5 clipped to 1.0) + 1.0 * (0.9 + 0.4 clipped to 1.0).
+    assert opportunity.estimated_residual_gain == 3.0
     assert opportunity.should_run is True
 
 

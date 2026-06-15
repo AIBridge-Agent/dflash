@@ -45,13 +45,17 @@ def estimate_depth_mass_eal(candidate_groups: Sequence[Sequence]) -> float:
     """Cheap residual EAL upper estimate from per-depth top-k probability mass.
 
     For each residual-tail depth d, let p_d be the sum of the selected top-k
-    edge probabilities at that depth, clipped to 1. The estimate is the prefix
-    expected accepted length: p_1 + p_1 p_2 + ... . This avoids constructing a
-    DDTree before the gate decides whether residual verification is worthwhile.
+    edge probabilities at that depth, clipped to 1. The estimate includes the
+    verifier bonus token and prefix expected accepted length:
+    1 + p_1 + p_1 p_2 + ... . This avoids constructing a DDTree before the
+    gate decides whether residual verification is worthwhile.
     """
 
+    if not candidate_groups:
+        return 0.0
+
     running_product = 1.0
-    expected_length = 0.0
+    expected_length = 1.0
     for group in candidate_groups:
         depth_mass = min(1.0, sum(float(candidate.probability) for candidate in group))
         running_product *= depth_mass
