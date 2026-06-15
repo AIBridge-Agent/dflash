@@ -89,16 +89,19 @@ def _tree_attention_mask(
     q_len = len(parents)
     kv_len = past_length + q_len
     mask = torch.zeros((1, 1, q_len, kv_len), device=device, dtype=dtype)
-    blocked_value = -1.0e4
+    if q_len == 0:
+        return mask
+
+    allowed = torch.zeros((q_len, q_len), dtype=torch.bool)
     for query_index in range(q_len):
-        allowed = set()
         cursor: int | None = query_index
         while cursor is not None:
-            allowed.add(cursor)
+            allowed[query_index, cursor] = True
             cursor = parents[cursor]
-        for key_index in range(q_len):
-            if key_index not in allowed:
-                mask[:, :, query_index, past_length + key_index] = blocked_value
+
+    local_mask = torch.zeros((q_len, q_len), dtype=dtype)
+    local_mask.masked_fill_(~allowed, -1.0e4)
+    mask[..., past_length:] = local_mask.to(device=device, non_blocking=True)
     return mask
 
 
