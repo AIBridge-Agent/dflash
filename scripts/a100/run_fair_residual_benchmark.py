@@ -115,6 +115,8 @@ def run_policy(
     residual_gain_scale: float,
     residual_min_gain: float,
     residual_min_margin: float,
+    residual_draft_seconds: float | None,
+    residual_target_seconds: float | None,
 ) -> dict[str, Any]:
     reset_gpu_state()
     enable_residual = policy == "dflash_block16_residual"
@@ -134,6 +136,8 @@ def run_policy(
         residual_gain_scale=residual_gain_scale,
         residual_min_gain=residual_min_gain,
         residual_min_margin=residual_min_margin,
+        residual_draft_seconds=residual_draft_seconds,
+        residual_target_seconds=residual_target_seconds,
     )
     torch.cuda.synchronize()
     wall_seconds = time.perf_counter() - start
@@ -171,6 +175,8 @@ def run_policy(
         "residual_gain_scale": residual_gain_scale,
         "residual_min_gain": residual_min_gain,
         "residual_min_margin": residual_min_margin,
+        "residual_draft_seconds": residual_draft_seconds,
+        "residual_target_seconds": residual_target_seconds,
         "peak_memory_mib": float(torch.cuda.max_memory_allocated() / 1024 / 1024),
     }
     del stats
@@ -291,6 +297,8 @@ def main() -> None:
     parser.add_argument("--residual-gain-scale", type=float, default=0.6)
     parser.add_argument("--residual-min-gain", type=float, default=3.0)
     parser.add_argument("--residual-min-margin", type=float, default=0.2)
+    parser.add_argument("--residual-draft-seconds", type=float, default=None)
+    parser.add_argument("--residual-target-seconds", type=float, default=None)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--output-dir", type=Path, default=Path("results/residual_fair_benchmark")
@@ -345,6 +353,8 @@ def main() -> None:
                         residual_gain_scale=args.residual_gain_scale,
                         residual_min_gain=args.residual_min_gain,
                         residual_min_margin=args.residual_min_margin,
+                        residual_draft_seconds=args.residual_draft_seconds,
+                        residual_target_seconds=args.residual_target_seconds,
                     )
                     row.update(
                         {
@@ -357,6 +367,8 @@ def main() -> None:
                             "residual_gain_scale": args.residual_gain_scale,
                             "residual_min_gain": args.residual_min_gain,
                             "residual_min_margin": args.residual_min_margin,
+                            "residual_draft_seconds": args.residual_draft_seconds,
+                            "residual_target_seconds": args.residual_target_seconds,
                             "fairness": {
                                 "paired_prompt": True,
                                 "cuda_cache_reset_before_each_policy": True,

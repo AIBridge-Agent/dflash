@@ -168,8 +168,6 @@ def dflash_generate(
         block_output_ids = output_ids[:, start : start + block_size].clone()
         block_position_ids = position_ids[:, start : start + block_size]
         block_probabilities = [1.0]
-        residual_top_token_ids = ()
-        residual_top_probabilities = ()
         measured_draft_seconds = residual_draft_seconds
         measured_target_seconds = residual_target_seconds
         if block_size > 1:
@@ -196,24 +194,6 @@ def dflash_generate(
             past_key_values_draft.crop(start)
             sampled_draft_ids = sample(draft_logits)
             block_output_ids[:, 1:] = sampled_draft_ids
-            if enable_residual:
-                draft_probs = torch.softmax(draft_logits, dim=-1)
-                sampled_probs = torch.gather(
-                    draft_probs, -1, sampled_draft_ids.unsqueeze(-1)
-                ).squeeze(-1)
-                block_probabilities = [1.0] + [
-                    float(x) for x in sampled_probs[0].detach().cpu().tolist()
-                ]
-                topk = min(int(residual_tree_width), int(draft_probs.shape[-1]))
-                top_probs, top_ids = torch.topk(draft_probs, k=topk, dim=-1)
-                residual_top_token_ids = tuple(
-                    tuple(int(x) for x in row)
-                    for row in top_ids[0].detach().cpu().tolist()
-                )
-                residual_top_probabilities = tuple(
-                    tuple(float(x) for x in row)
-                    for row in top_probs[0].detach().cpu().tolist()
-                )
             if draft_prefill and return_stats:
                 draft_prefill = False
                 decode_start = _cuda_time()
@@ -252,6 +232,36 @@ def dflash_generate(
         )
         residual_ran = False
         if enable_residual and block_size > 2 and acceptance_length < block_size - 1:
+            tail_start_row = int(acceptance_length + 1)
+            residual_candidate_groups = ()
+            if tail_start_row < int(draft_logits.shape[1]):
+                tail_logits = draft_logits[:, tail_start_row:, :]
+                tail_probs = torch.softmax(tail_logits, dim=-1)
+                tail_sampled_ids = sampled_draft_ids[:, tail_start_row:]
+                tail_sampled_probs = torch.gather(
+                    tail_probs, -1, tail_sampled_ids.unsqueeze(-1)
+                ).squeeze(-1)
+                block_probabilities = [1.0] * len(block_output_ids[0])
+                for offset, probability in enumerate(
+                    tail_sampled_probs[0].detach().cpu().tolist()
+                ):
+                    block_probabilities[tail_start_row + 1 + offset] = float(
+                        probability
+                    )
+                topk = min(int(residual_tree_width), int(tail_probs.shape[-1]))
+                top_probs, top_ids = torch.topk(tail_probs, k=topk, dim=-1)
+                residual_candidate_groups = build_residual_candidate_groups(
+                    top_token_ids_by_block=tuple(
+                        tuple(int(x) for x in row)
+                        for row in top_ids[0].detach().cpu().tolist()
+                    ),
+                    top_probabilities_by_block=tuple(
+                        tuple(float(x) for x in row)
+                        for row in top_probs[0].detach().cpu().tolist()
+                    ),
+                    start_position=int(start),
+                    first_block_index=int(acceptance_length + 2),
+                )
             try:
                 opportunity = build_residual_opportunity(
                     block_token_ids=tuple(
@@ -267,16 +277,7 @@ def dflash_generate(
                     draft_seconds=float(measured_draft_seconds or 1e-9),
                     target_seconds=current_target_seconds,
                     residual_budget=residual_budget,
-                    residual_candidate_groups=build_residual_candidate_groups(
-                        top_token_ids_by_block=residual_top_token_ids[
-                            acceptance_length + 1 :
-                        ],
-                        top_probabilities_by_block=residual_top_probabilities[
-                            acceptance_length + 1 :
-                        ],
-                        start_position=int(start),
-                        first_block_index=int(acceptance_length + 2),
-                    ),
+                    residual_candidate_groups=residual_candidate_groups,
                     residual_target_seconds=residual_target_seconds_estimate,
                     residual_gain_scale=residual_gain_scale,
                     residual_min_gain=residual_min_gain,
