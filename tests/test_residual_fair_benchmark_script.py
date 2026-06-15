@@ -54,6 +54,8 @@ def test_fair_benchmark_compares_only_block16_policies() -> None:
     assert "dflash_block16" in source
     assert "dflash_block16_residual" in source
     assert "block_size=16" in source
+    assert "enable_primary_ddtree=True" in source
+    assert "effective_residual_budget = 128" in source
     assert "baseline_block1" not in source
 
 

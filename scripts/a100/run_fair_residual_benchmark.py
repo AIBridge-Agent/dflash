@@ -202,7 +202,7 @@ def run_policy(
 ) -> dict[str, Any]:
     reset_gpu_state()
     enable_residual = policy == "dflash_block16_residual"
-    effective_residual_budget = 128 if enable_residual else residual_budget
+    effective_residual_budget = 128
     start = time.perf_counter()
     stats = dflash_generate(
         draft,
@@ -213,6 +213,7 @@ def run_policy(
         temperature=0.0,
         block_size=16,
         return_stats=True,
+        enable_primary_ddtree=True,
         enable_residual=enable_residual,
         residual_budget=effective_residual_budget,
         residual_tree_width=residual_tree_width,
