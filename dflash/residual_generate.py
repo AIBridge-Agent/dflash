@@ -10,8 +10,8 @@ from .residual_gating import ResidualGateDecision, decide_residual_gate
 from .residual_reroot import extract_residual_path
 from .residual_surrogate import (
     ResidualDDTree,
-    estimate_depth_mass_eal,
     estimate_residual_gain,
+    estimate_top1_path_eal,
 )
 from .residual_types import CandidateSource, ResidualCandidate, ResidualPath
 
@@ -117,9 +117,10 @@ def build_residual_opportunity(
 ) -> ResidualOpportunity:
     """Build and gate a residual opportunity without invoking the drafter.
 
-    When candidate groups are provided, the gate uses a residual DDTree over the
-    whole residual tail distribution. Otherwise it falls back to the sampled-tail
-    single-path expected prefix length.
+    When candidate groups are provided, the gate uses the top-1 residual tail
+    sequence as a cheap EAL estimate. Actual verification integrations may still
+    spend a DDTree budget after this gate passes. Otherwise it falls back to the
+    sampled-tail single-path expected prefix length.
     """
 
     path = extract_residual_path(
@@ -131,7 +132,7 @@ def build_residual_opportunity(
     )
     residual_tree = None
     if residual_candidate_groups:
-        estimated_gain = estimate_depth_mass_eal(residual_candidate_groups)
+        estimated_gain = estimate_top1_path_eal(residual_candidate_groups)
     else:
         estimated_gain = estimate_residual_gain([path], budget=residual_budget)
 

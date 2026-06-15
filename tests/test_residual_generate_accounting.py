@@ -2,6 +2,8 @@
 import ast
 from pathlib import Path
 
+import pytest
+
 from dflash.residual_generate import (
     build_residual_candidate_groups,
     build_residual_edge_records,
@@ -31,7 +33,7 @@ def test_build_residual_opportunity_from_dflash_block_accounting() -> None:
     assert opportunity.path.anchor.token_id == 99
 
 
-def test_build_residual_opportunity_uses_depth_mass_eal_when_candidate_groups_exist() -> (
+def test_build_residual_opportunity_uses_top1_path_eal_when_candidate_groups_exist() -> (
     None
 ):
     groups = build_residual_candidate_groups(
@@ -56,8 +58,8 @@ def test_build_residual_opportunity_uses_depth_mass_eal_when_candidate_groups_ex
 
     assert opportunity.residual_tree is None
     assert opportunity.tree_nodes == 0
-    # EAL = 1 bonus token + (0.95 + 0.5 clipped to 1.0) + 1.0 * (0.9 + 0.4 clipped to 1.0).
-    assert opportunity.estimated_residual_gain == 3.0
+    # EAL = 1 bonus token + top1 0.95 + 0.95 * top1 0.9.
+    assert opportunity.estimated_residual_gain == pytest.approx(2.805)
     assert opportunity.should_run is True
 
 

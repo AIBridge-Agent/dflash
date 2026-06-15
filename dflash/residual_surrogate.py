@@ -63,6 +63,30 @@ def estimate_depth_mass_eal(candidate_groups: Sequence[Sequence]) -> float:
     return expected_length
 
 
+def estimate_top1_path_eal(candidate_groups: Sequence[Sequence]) -> float:
+    """Cheap residual EAL estimate from the top-1 single residual sequence.
+
+    The residual gate should estimate the benefit of reusing the most likely
+    single tail continuation, while the actual accepted target verification can
+    still spend a DDTree budget. For each residual-tail depth d, p_d is the
+    largest available candidate probability at that depth. The estimate includes
+    the verifier bonus token: 1 + p_1 + p_1 p_2 + ... .
+    """
+
+    if not candidate_groups:
+        return 0.0
+
+    running_product = 1.0
+    expected_length = 1.0
+    for group in candidate_groups:
+        if not group:
+            break
+        top1_probability = max(float(candidate.probability) for candidate in group)
+        running_product *= top1_probability
+        expected_length += running_product
+    return expected_length
+
+
 def build_residual_ddtree(
     anchor: VerificationAnchor,
     candidate_groups: Sequence[Sequence],

@@ -29,7 +29,7 @@ from .residual_generate import (
     build_residual_edge_records,
     build_residual_opportunity,
 )
-from .residual_surrogate import build_residual_ddtree, estimate_depth_mass_eal
+from .residual_surrogate import build_residual_ddtree, estimate_top1_path_eal
 from .residual_tree_verify import (
     linearize_residual_tree,
     parent_indices,
@@ -380,7 +380,7 @@ def dflash_generate(
                     tree_walk.accepted_count + 1 :
                 ]
                 if enable_residual and remaining_candidate_groups:
-                    residual_estimated_gain = estimate_depth_mass_eal(
+                    residual_estimated_gain = estimate_top1_path_eal(
                         remaining_candidate_groups
                     )
                     residual_target_seconds_estimate = (
@@ -443,7 +443,7 @@ def dflash_generate(
                             "residual_min_margin": float(
                                 residual_gate.min_throughput_margin
                             ),
-                            "eal_estimator": "depth_mass",
+                            "eal_estimator": "top1_path",
                             "verification_mode": "residual_gate",
                         }
                         residual_gate_records.append(residual_gate_record)
@@ -748,7 +748,7 @@ def dflash_generate(
                         "residual_min_margin": float(
                             opportunity.gate.min_throughput_margin
                         ),
-                        "eal_estimator": "depth_mass",
+                        "eal_estimator": "top1_path",
                     }
                     residual_gate_records.append(gate_record)
 
