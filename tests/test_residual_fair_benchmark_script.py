@@ -39,6 +39,15 @@ def test_fair_benchmark_alternates_policy_order_and_resets_cuda_cache() -> None:
     assert "cuda_cache_reset_before_each_policy" in source
 
 
+def test_fair_benchmark_reports_decode_timing_excluding_prompt_prefill() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+
+    assert "decode_after_prefill" in source
+    assert "decode_wall_seconds" in source
+    assert "end_to_end_wall_seconds" in source
+    assert "time_to_first_token" in source
+
+
 def test_fair_benchmark_supports_balanced_round_robin_rollout() -> None:
     source = SCRIPT.read_text(encoding="utf-8")
 

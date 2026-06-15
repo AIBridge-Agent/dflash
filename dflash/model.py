@@ -183,7 +183,6 @@ def dflash_generate(
     residual_target_seconds_sum = 0.0
     residual_tree_node_sum = 0
     start = num_input_tokens
-    draft_prefill = True
     target_seconds_sum = 0.0
     target_seconds_count = 0
 
@@ -220,10 +219,6 @@ def dflash_generate(
             if not use_primary_ddtree:
                 sampled_draft_ids = sample(draft_logits)
                 block_output_ids[:, 1:] = sampled_draft_ids
-            if draft_prefill and return_stats:
-                draft_prefill = False
-                decode_start = _cuda_time()
-
             if use_primary_ddtree:
                 tree_logits = draft_logits.float()
                 topk = min(int(residual_tree_width), int(tree_logits.shape[-1]))
@@ -1015,6 +1010,7 @@ def dflash_generate(
         num_input_tokens=num_input_tokens,
         num_output_tokens=num_output_tokens,
         time_to_first_token=time_to_first_token,
+        decode_seconds=total_decode_time,
         time_per_output_token=total_decode_time / num_output_tokens,
         acceptance_lengths=acceptance_lengths,
         residual_attempts=residual_attempts,

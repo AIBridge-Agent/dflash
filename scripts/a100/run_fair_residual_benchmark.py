@@ -225,7 +225,15 @@ def run_policy(
         residual_collect_diagnostics=residual_collect_diagnostics,
     )
     torch.cuda.synchronize()
-    wall_seconds = time.perf_counter() - start
+    end_to_end_wall_seconds = time.perf_counter() - start
+    decode_wall_seconds = float(
+        getattr(
+            stats,
+            "decode_seconds",
+            float(stats.time_per_output_token) * int(stats.num_output_tokens),
+        )
+    )
+    wall_seconds = decode_wall_seconds
     gate_records = list(getattr(stats, "residual_gate_records", []))
     edge_records = list(getattr(stats, "residual_edge_records", []))
     residual_attempt_count = int(
@@ -268,6 +276,10 @@ def run_policy(
         "output_tokens": int(stats.num_output_tokens),
         "wall_seconds": wall_seconds,
         "tokens_per_second": float(stats.num_output_tokens / max(wall_seconds, 1e-9)),
+        "timing_scope": "decode_after_prefill",
+        "decode_wall_seconds": decode_wall_seconds,
+        "end_to_end_wall_seconds": end_to_end_wall_seconds,
+        "time_to_first_token": float(getattr(stats, "time_to_first_token", 0.0) or 0.0),
         "acceptance_lengths": list(stats.acceptance_lengths),
         "residual_attempts": residual_attempt_count,
         "residual_runs": int(getattr(stats, "residual_runs", 0)),
@@ -396,12 +408,19 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
             policy_rows = [row for row in dataset_rows if row["policy"] == policy]
             tps = [float(row["tokens_per_second"]) for row in policy_rows]
             wall = [float(row["wall_seconds"]) for row in policy_rows]
+            end_to_end_wall = [
+                float(row.get("end_to_end_wall_seconds", row["wall_seconds"]))
+                for row in policy_rows
+            ]
             output_tokens = [int(row["output_tokens"]) for row in policy_rows]
             summary[dataset][policy] = {
                 "num_runs": len(policy_rows),
                 "mean_tps": statistics.fmean(tps) if tps else 0.0,
                 "median_tps": statistics.median(tps) if tps else 0.0,
                 "mean_wall_seconds": statistics.fmean(wall) if wall else 0.0,
+                "mean_end_to_end_wall_seconds": (
+                    statistics.fmean(end_to_end_wall) if end_to_end_wall else 0.0
+                ),
                 "total_output_tokens": sum(output_tokens),
                 "residual_attempts": sum(
                     int(row.get("residual_attempts", 0)) for row in policy_rows
