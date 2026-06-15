@@ -45,7 +45,7 @@ def test_zero_current_acceptance_can_still_trigger() -> None:
     assert decision.should_run is True
 
 
-def test_gate_applies_gain_calibration_without_min_gain_filter() -> None:
+def test_gate_applies_gain_calibration_after_min_gain_filter() -> None:
     decision = decide_residual_gate(
         current_accepted=1,
         draft_seconds=1.0,
@@ -59,6 +59,19 @@ def test_gate_applies_gain_calibration_without_min_gain_filter() -> None:
     assert decision.should_run is True
     assert decision.reason == "predicted_improvement"
     assert decision.effective_estimated_residual_gain == pytest.approx(2.0)
+
+
+def test_gate_requires_estimated_gain_above_minimum() -> None:
+    decision = decide_residual_gate(
+        current_accepted=1,
+        draft_seconds=1.0,
+        target_seconds=1.0,
+        estimated_residual_gain=2.0,
+        min_residual_gain=2.0,
+    )
+
+    assert decision.should_run is False
+    assert decision.reason == "estimated_gain_below_min"
 
 
 def test_gate_requires_minimum_throughput_margin() -> None:
