@@ -570,7 +570,7 @@ def main() -> None:
     parser.add_argument("--block-size", type=int, default=None)
     parser.add_argument("--max-samples", type=int, default=None)
     parser.add_argument("--enable-residual", action="store_true")
-    parser.add_argument("--residual-budget", type=int, default=64)
+    parser.add_argument("--residual-budget", type=int, default=128)
     parser.add_argument("--residual-tree-width", type=int, default=5)
     parser.add_argument("--residual-gain-scale", type=float, default=0.6)
     parser.add_argument("--residual-min-gain", type=float, default=3.0)

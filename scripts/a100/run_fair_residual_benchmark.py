@@ -202,6 +202,7 @@ def run_policy(
 ) -> dict[str, Any]:
     reset_gpu_state()
     enable_residual = policy == "dflash_block16_residual"
+    effective_residual_budget = 128 if enable_residual else residual_budget
     start = time.perf_counter()
     stats = dflash_generate(
         draft,
@@ -213,7 +214,7 @@ def run_policy(
         block_size=16,
         return_stats=True,
         enable_residual=enable_residual,
-        residual_budget=residual_budget,
+        residual_budget=effective_residual_budget,
         residual_tree_width=residual_tree_width,
         residual_gain_scale=residual_gain_scale,
         residual_min_gain=residual_min_gain,
@@ -325,7 +326,7 @@ def run_policy(
             gate_records,
             "tree_nodes",
         ),
-        "residual_budget": residual_budget,
+        "residual_budget": effective_residual_budget,
         "residual_tree_width": residual_tree_width,
         "residual_gain_scale": residual_gain_scale,
         "residual_min_gain": residual_min_gain,
@@ -468,7 +469,7 @@ def main() -> None:
     parser.add_argument("--round-robin-datasets", action="store_true")
     parser.add_argument("--start-with-residual", action="store_true")
     parser.add_argument("--max-new-tokens", type=int, default=256)
-    parser.add_argument("--residual-budget", type=int, default=64)
+    parser.add_argument("--residual-budget", type=int, default=128)
     parser.add_argument("--residual-tree-width", type=int, default=5)
     parser.add_argument("--residual-gain-scale", type=float, default=0.6)
     parser.add_argument("--residual-min-gain", type=float, default=3.0)

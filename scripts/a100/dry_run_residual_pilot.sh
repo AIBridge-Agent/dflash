@@ -48,8 +48,8 @@ python -m dflash.benchmark \
   --max-samples 128 \
   --block-size 16 \
   --enable-residual \
-  --residual-budget 64 \
-  --residual-tree-width 4 \
+  --residual-budget 128 \
+  --residual-tree-width 5 \
   --residual-gain-scale 0.6 \
   --residual-min-gain 3.0 \
   --residual-min-margin 0.2

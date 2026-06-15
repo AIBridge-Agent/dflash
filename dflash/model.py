@@ -34,6 +34,7 @@ from .residual_tree_verify import (
     parent_indices,
     walk_residual_tree,
 )
+from .residual_types import VerificationAnchor
 
 # ---------------------------------------------------------------------------
 # Model utilities
@@ -112,7 +113,7 @@ def dflash_generate(
     mask_token_id: int | None = None,
     return_stats: bool = False,
     enable_residual: bool = False,
-    residual_budget: int = 1,
+    residual_budget: int = 128,
     residual_tree_width: int = 5,
     residual_gain_scale: float = 0.6,
     residual_min_gain: float = 3.0,
@@ -125,6 +126,8 @@ def dflash_generate(
     max_length = num_input_tokens + max_new_tokens
     block_size = model.block_size if block_size is None else block_size
     mask_token_id = model.mask_token_id if mask_token_id is None else mask_token_id
+    if enable_residual:
+        residual_budget = 128
 
     output_ids = torch.full(
         (1, max_length + block_size),
@@ -208,11 +211,175 @@ def dflash_generate(
             if draft_start is not None:
                 measured_draft_seconds = _cuda_time() - draft_start
             past_key_values_draft.crop(start)
-            sampled_draft_ids = sample(draft_logits)
-            block_output_ids[:, 1:] = sampled_draft_ids
+            if not enable_residual:
+                sampled_draft_ids = sample(draft_logits)
+                block_output_ids[:, 1:] = sampled_draft_ids
             if draft_prefill and return_stats:
                 draft_prefill = False
                 decode_start = _cuda_time()
+
+            if enable_residual:
+                tree_logits = draft_logits.float()
+                topk = min(int(residual_tree_width), int(tree_logits.shape[-1]))
+                top_logits, top_token_ids = torch.topk(tree_logits, k=topk, dim=-1)
+                log_z = torch.logsumexp(tree_logits, dim=-1, keepdim=True)
+                top_probabilities = torch.exp(top_logits - log_z)
+                residual_candidate_groups = build_residual_candidate_groups(
+                    top_token_ids_by_block=tuple(
+                        tuple(int(x) for x in row)
+                        for row in top_token_ids[0].detach().cpu().tolist()
+                    ),
+                    top_probabilities_by_block=tuple(
+                        tuple(float(x) for x in row)
+                        for row in top_probabilities[0].detach().cpu().tolist()
+                    ),
+                    start_position=int(start),
+                    first_block_index=1,
+                )
+                anchor_token_id = int(output_ids[0, start].detach().cpu().item())
+                residual_tree = build_residual_ddtree(
+                    VerificationAnchor(token_id=anchor_token_id, position=int(start)),
+                    residual_candidate_groups,
+                    budget=residual_budget,
+                )
+                tree_nodes = linearize_residual_tree(residual_tree)
+                residual_attempt_count += 1
+                residual_runs += 1
+                residual_tree_node_sum += len(tree_nodes)
+                estimated_gain = float(residual_tree.expected_accept_length)
+                effective_gain = estimated_gain * residual_gain_scale
+                residual_estimated_gain_sum += estimated_gain
+                residual_effective_gain_sum += effective_gain
+
+                past_key_values_target.crop(start)
+                tree_ids = torch.tensor(
+                    [anchor_token_id, *(node.token_id for node in tree_nodes)],
+                    dtype=torch.long,
+                    device=target.device,
+                ).unsqueeze(0)
+                tree_position_ids = torch.tensor(
+                    [int(start), *(node.position for node in tree_nodes)],
+                    dtype=torch.long,
+                    device=target.device,
+                ).unsqueeze(0)
+                tree_target_start = (
+                    _cuda_time() if residual_target_seconds is None else None
+                )
+                tree_output_dtype = next(target.parameters()).dtype
+                tree_output = target(
+                    tree_ids,
+                    position_ids=tree_position_ids,
+                    attention_mask=_tree_attention_mask(
+                        parent_indices(tree_nodes),
+                        past_length=int(start),
+                        device=target.device,
+                        dtype=tree_output_dtype,
+                    ),
+                    past_key_values=past_key_values_target,
+                    use_cache=True,
+                    output_hidden_states=True,
+                )
+                tree_target_seconds = (
+                    float(residual_target_seconds)
+                    if residual_target_seconds is not None
+                    else _cuda_time() - tree_target_start
+                )
+                residual_target_seconds_sum += tree_target_seconds
+                denominator = (
+                    float(measured_draft_seconds or 1e-9) + tree_target_seconds
+                )
+
+                tree_posterior = sample(tree_output.logits, temperature)
+                tree_walk = walk_residual_tree(
+                    tree_nodes,
+                    target_token_ids_by_flat_index=tuple(
+                        int(token_id)
+                        for token_id in tree_posterior[0].detach().cpu().tolist()
+                    ),
+                )
+                realized_tokens = tree_walk.accepted_count + 1
+                residual_baseline_throughput_sum += realized_tokens / max(
+                    denominator, 1e-9
+                )
+                residual_predicted_throughput_sum += (
+                    realized_tokens + effective_gain
+                ) / max(denominator, 1e-9)
+                for edge_record in tree_walk.edge_records:
+                    residual_edge_count += 1
+                    residual_edge_accepted_count += int(
+                        bool(edge_record.get("accepted", False))
+                    )
+                    residual_edge_probability_sum += float(
+                        edge_record.get("edge_probability", 0.0)
+                    )
+                    if residual_collect_diagnostics:
+                        residual_edge_records.append(
+                            {
+                                **edge_record,
+                                "start": int(start),
+                                "acceptance_length": int(tree_walk.accepted_count),
+                                "current_accepted": int(tree_walk.accepted_count + 1),
+                                "residual_run_index": int(residual_runs),
+                                "estimated_residual_gain": estimated_gain,
+                                "effective_estimated_residual_gain": effective_gain,
+                                "verification_mode": "primary_tree",
+                            }
+                        )
+                if residual_collect_diagnostics:
+                    residual_gate_records.append(
+                        {
+                            "start": int(start),
+                            "acceptance_length": int(tree_walk.accepted_count),
+                            "current_accepted": int(tree_walk.accepted_count + 1),
+                            "estimated_residual_gain": estimated_gain,
+                            "effective_estimated_residual_gain": effective_gain,
+                            "baseline_throughput": residual_baseline_throughput_sum
+                            / residual_attempt_count,
+                            "predicted_residual_throughput": residual_predicted_throughput_sum
+                            / residual_attempt_count,
+                            "should_run": True,
+                            "reason": "primary_ddtree_always",
+                            "tree_nodes": int(len(tree_nodes)),
+                            "draft_seconds": float(measured_draft_seconds or 1e-9),
+                            "target_seconds": tree_target_seconds,
+                            "residual_target_seconds": tree_target_seconds,
+                            "residual_gain_scale": float(residual_gain_scale),
+                            "residual_min_gain": float(residual_min_gain),
+                            "residual_min_margin": float(residual_min_margin),
+                            "eal_estimator": "ddtree",
+                        }
+                    )
+
+                accepted_indices = [
+                    0,
+                    *(node.flat_index for node in tree_walk.accepted_nodes),
+                ]
+                accepted_index_tensor = torch.tensor(
+                    accepted_indices, dtype=torch.long, device=tree_ids.device
+                )
+                accepted_tokens = tree_ids.index_select(1, accepted_index_tensor)
+                output_ids[:, start : start + accepted_tokens.shape[1]] = (
+                    accepted_tokens
+                )
+                mismatch_position = start + accepted_tokens.shape[1]
+                output_ids[:, mismatch_position] = tree_walk.mismatch_token_id
+                compact_dynamic_cache(
+                    past_key_values_target, int(start), accepted_indices
+                )
+                start = mismatch_position
+                acceptance_lengths.append(tree_walk.accepted_count + 1)
+                target_hidden = extract_context_feature(
+                    tree_output.hidden_states, model.target_layer_ids
+                ).index_select(1, accepted_index_tensor)
+                if residual_target_seconds is None:
+                    target_seconds_sum += tree_target_seconds
+                    target_seconds_count += 1
+                if stop_token_ids is not None and any(
+                    stop_token_id in output_ids[:, num_input_tokens:]
+                    for stop_token_id in stop_token_ids
+                ):
+                    break
+                continue
 
         target_start = (
             _cuda_time()
