@@ -12,7 +12,16 @@ SCRIPT = (
 def test_fair_benchmark_runs_all_dflash_datasets() -> None:
     source = SCRIPT.read_text(encoding="utf-8")
 
-    for dataset in ["gsm8k", "math500", "humaneval", "mbpp", "mt-bench"]:
+    for dataset in [
+        "gsm8k",
+        "math500",
+        "aime25",
+        "humaneval",
+        "mbpp",
+        "livecodebench",
+        "mt_bench",
+        "alpaca",
+    ]:
         assert dataset in source
 
 
@@ -20,13 +29,23 @@ def test_fair_benchmark_alternates_policy_order_and_resets_cuda_cache() -> None:
     source = SCRIPT.read_text(encoding="utf-8")
 
     assert "def policy_order" in source
-    assert "sample_index % 2" in source
+    assert "pair_index % 2" in source
+    assert "start_with_residual" in source
     assert "tuple(reversed(POLICIES))" in source
     assert "def reset_gpu_state" in source
     assert "torch.cuda.synchronize()" in source
     assert "torch.cuda.empty_cache()" in source
     assert "torch.cuda.ipc_collect()" in source
     assert "cuda_cache_reset_before_each_policy" in source
+
+
+def test_fair_benchmark_supports_balanced_round_robin_rollout() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+
+    assert "--dataset-samples" in source
+    assert "--round-robin-datasets" in source
+    assert "build_round_robin_plan" in source
+    assert "pair_index" in source
 
 
 def test_fair_benchmark_compares_only_block16_policies() -> None:

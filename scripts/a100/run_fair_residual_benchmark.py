@@ -56,8 +56,40 @@ DATASETS: dict[str, dict[str, Any]] = {
         "format": lambda x: x["prompt"],
         "multi_turn": True,
     },
+    "mt_bench": {
+        "load_args": ("HuggingFaceH4/mt_bench_prompts",),
+        "load_kwargs": {"split": "train"},
+        "format": lambda x: x["prompt"],
+        "multi_turn": True,
+    },
+    "aime25": {
+        "load_args": ("math-ai/aime25",),
+        "load_kwargs": {"split": "test"},
+        "format": lambda x: (
+            f"{x['problem']}\nPlease reason step by step, and put your final answer within \\boxed{{}}."
+        ),
+    },
+    "livecodebench": {
+        "load_args": ("livecodebench/code_generation_lite", "release_latest"),
+        "load_kwargs": {"split": "test", "trust_remote_code": True},
+        "format": lambda x: (
+            "Write a complete solution for the following programming problem.\n"
+            f"Title: {x['question_title']}\n\n{x['question_content']}\n\n"
+            f"Starter code:\n```python\n{x['starter_code']}\n```"
+        ),
+    },
+    "alpaca": {
+        "load_args": ("tatsu-lab/alpaca",),
+        "load_kwargs": {"split": "train"},
+        "format": lambda x: (
+            f"{x['instruction']}\n\nInput:\n{x['input']}"
+            if x.get("input")
+            else x["instruction"]
+        ),
+    },
 }
 
+DEFAULT_DATASETS = ("gsm8k", "math500", "humaneval", "mbpp", "mt-bench")
 POLICIES = ("dflash_block16", "dflash_block16_residual")
 
 
@@ -96,10 +128,59 @@ def make_input(tokenizer: AutoTokenizer, prompt: str) -> torch.Tensor:
     return tokenizer([text], return_tensors="pt").input_ids.to("cuda:0")
 
 
-def policy_order(sample_index: int) -> tuple[str, str]:
-    if sample_index % 2 == 0:
-        return POLICIES
-    return tuple(reversed(POLICIES))  # type: ignore[return-value]
+def policy_order(
+    pair_index: int, *, start_with_residual: bool = False
+) -> tuple[str, str]:
+    first_order = tuple(reversed(POLICIES)) if start_with_residual else POLICIES
+    if pair_index % 2 == 0:
+        return first_order  # type: ignore[return-value]
+    return tuple(reversed(first_order))  # type: ignore[return-value]
+
+
+def parse_dataset_sample_counts(
+    datasets: list[str], specs: list[str] | None, *, default: int
+) -> dict[str, int]:
+    counts = dict.fromkeys(datasets, default)
+    if not specs:
+        return counts
+    for spec in specs:
+        if "=" in spec:
+            dataset, value = spec.split("=", 1)
+        elif ":" in spec:
+            dataset, value = spec.split(":", 1)
+        else:
+            raise ValueError(f"invalid dataset sample spec: {spec}")
+        if dataset not in counts:
+            raise ValueError(f"sample count specified for unloaded dataset: {dataset}")
+        counts[dataset] = int(value)
+    return counts
+
+
+def build_round_robin_plan(
+    prompts_by_dataset: dict[str, list[str]], datasets: list[str]
+) -> list[tuple[str, int, str, int]]:
+    plan: list[tuple[str, int, str, int]] = []
+    max_count = max(
+        (len(prompts) for prompts in prompts_by_dataset.values()), default=0
+    )
+    for sample_index in range(max_count):
+        for dataset_name in datasets:
+            prompts = prompts_by_dataset[dataset_name]
+            if sample_index < len(prompts):
+                plan.append(
+                    (dataset_name, sample_index, prompts[sample_index], len(plan))
+                )
+    return plan
+
+
+def build_sequential_plan(
+    prompts_by_dataset: dict[str, list[str]], datasets: list[str]
+) -> list[tuple[str, int, str, int]]:
+    plan: list[tuple[str, int, str, int]] = []
+    for dataset_name in datasets:
+        for sample_index, prompt in enumerate(prompts_by_dataset[dataset_name]):
+            plan.append((dataset_name, sample_index, prompt, len(plan)))
+    return plan
 
 
 def run_policy(
@@ -289,8 +370,16 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--datasets", nargs="+", default=list(DATASETS))
+    parser.add_argument("--datasets", nargs="+", default=list(DEFAULT_DATASETS))
     parser.add_argument("--max-samples", type=int, default=32)
+    parser.add_argument(
+        "--dataset-samples",
+        nargs="*",
+        default=None,
+        help="Per-dataset pair counts, e.g. gsm8k=110 math500=110 aime25=30.",
+    )
+    parser.add_argument("--round-robin-datasets", action="store_true")
+    parser.add_argument("--start-with-residual", action="store_true")
     parser.add_argument("--max-new-tokens", type=int, default=256)
     parser.add_argument("--residual-budget", type=int, default=64)
     parser.add_argument("--residual-tree-width", type=int, default=4)
@@ -327,68 +416,82 @@ def main() -> None:
     ).eval()
     tokenizer = AutoTokenizer.from_pretrained(args.target_model)
 
+    dataset_sample_counts = parse_dataset_sample_counts(
+        args.datasets, args.dataset_samples, default=args.max_samples
+    )
+    prompts_by_dataset = {
+        dataset_name: load_prompts(
+            dataset_name,
+            max_samples=dataset_sample_counts[dataset_name],
+            seed=args.seed,
+        )
+        for dataset_name in args.datasets
+    }
+    if args.round_robin_datasets:
+        prompt_plan = build_round_robin_plan(prompts_by_dataset, args.datasets)
+    else:
+        prompt_plan = build_sequential_plan(prompts_by_dataset, args.datasets)
+
     all_rows: list[dict[str, Any]] = []
     with jsonl_path.open("w", encoding="utf-8") as handle:
-        for dataset_name in args.datasets:
-            print(f"dataset={dataset_name}")
-            prompts = load_prompts(
-                dataset_name, max_samples=args.max_samples, seed=args.seed
+        for dataset_name, sample_index, prompt, pair_index in prompt_plan:
+            input_ids = make_input(tokenizer, prompt)
+            order = policy_order(
+                pair_index, start_with_residual=args.start_with_residual
             )
-            for sample_index, prompt in enumerate(prompts):
-                input_ids = make_input(tokenizer, prompt)
-                order = policy_order(sample_index)
-                print(
-                    f"dataset={dataset_name} sample={sample_index} order={list(order)}"
+            print(
+                f"dataset={dataset_name} sample={sample_index} pair={pair_index} order={list(order)}"
+            )
+            for policy in order:
+                row = run_policy(
+                    policy=policy,
+                    draft=draft,
+                    target=target,
+                    tokenizer=tokenizer,
+                    input_ids=input_ids,
+                    max_new_tokens=args.max_new_tokens,
+                    residual_budget=args.residual_budget,
+                    residual_tree_width=args.residual_tree_width,
+                    residual_gain_scale=args.residual_gain_scale,
+                    residual_min_gain=args.residual_min_gain,
+                    residual_min_margin=args.residual_min_margin,
+                    residual_draft_seconds=args.residual_draft_seconds,
+                    residual_target_seconds=args.residual_target_seconds,
                 )
-                for policy in order:
-                    row = run_policy(
-                        policy=policy,
-                        draft=draft,
-                        target=target,
-                        tokenizer=tokenizer,
-                        input_ids=input_ids,
-                        max_new_tokens=args.max_new_tokens,
-                        residual_budget=args.residual_budget,
-                        residual_tree_width=args.residual_tree_width,
-                        residual_gain_scale=args.residual_gain_scale,
-                        residual_min_gain=args.residual_min_gain,
-                        residual_min_margin=args.residual_min_margin,
-                        residual_draft_seconds=args.residual_draft_seconds,
-                        residual_target_seconds=args.residual_target_seconds,
-                    )
-                    row.update(
-                        {
-                            "dataset": dataset_name,
-                            "sample_index": sample_index,
-                            "order": list(order),
-                            "max_new_tokens": args.max_new_tokens,
-                            "residual_budget": args.residual_budget,
-                            "residual_tree_width": args.residual_tree_width,
-                            "residual_gain_scale": args.residual_gain_scale,
-                            "residual_min_gain": args.residual_min_gain,
-                            "residual_min_margin": args.residual_min_margin,
-                            "residual_draft_seconds": args.residual_draft_seconds,
-                            "residual_target_seconds": args.residual_target_seconds,
-                            "fairness": {
-                                "paired_prompt": True,
-                                "cuda_cache_reset_before_each_policy": True,
-                                "alternating_order_by_sample": True,
-                                "hf_cache": str(
-                                    Path.home() / "hf_cache" / "transformers"
-                                ),
-                            },
-                        }
-                    )
-                    handle.write(json.dumps(row, ensure_ascii=False) + "\n")
-                    handle.flush()
-                    all_rows.append(row)
-                    print(
-                        f"  {policy}: tps={row['tokens_per_second']:.3f} "
-                        f"wall={row['wall_seconds']:.3f}s residual_runs={row['residual_runs']} "
-                        f"delta_hat={row['mean_delta_hat']:.3f}"
-                    )
-                del input_ids
-                reset_gpu_state()
+                row.update(
+                    {
+                        "dataset": dataset_name,
+                        "sample_index": sample_index,
+                        "pair_index": pair_index,
+                        "order": list(order),
+                        "max_new_tokens": args.max_new_tokens,
+                        "residual_budget": args.residual_budget,
+                        "residual_tree_width": args.residual_tree_width,
+                        "residual_gain_scale": args.residual_gain_scale,
+                        "residual_min_gain": args.residual_min_gain,
+                        "residual_min_margin": args.residual_min_margin,
+                        "residual_draft_seconds": args.residual_draft_seconds,
+                        "residual_target_seconds": args.residual_target_seconds,
+                        "fairness": {
+                            "paired_prompt": True,
+                            "cuda_cache_reset_before_each_policy": True,
+                            "alternating_order_by_pair": True,
+                            "round_robin_datasets": bool(args.round_robin_datasets),
+                            "start_with_residual": bool(args.start_with_residual),
+                            "hf_cache": str(Path.home() / "hf_cache" / "transformers"),
+                        },
+                    }
+                )
+                handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+                handle.flush()
+                all_rows.append(row)
+                print(
+                    f"  {policy}: tps={row['tokens_per_second']:.3f} "
+                    f"wall={row['wall_seconds']:.3f}s residual_runs={row['residual_runs']} "
+                    f"delta_hat={row['mean_delta_hat']:.3f}"
+                )
+            del input_ids
+            reset_gpu_state()
 
     summary = summarize(all_rows)
     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
