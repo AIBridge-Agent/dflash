@@ -163,7 +163,8 @@ def test_dflash_generate_uses_residual_tail_without_second_draft_call() -> None:
     assert "compact_dynamic_cache" in source
     assert "build_residual_ddtree" in source
     assert "primary_ddtree_always" in source
-    assert "residual_ddtree_after_primary" in source
+    assert "residual_gate" in source
+    assert "residual_tree" in source
     assert "enable_primary_ddtree" in source
     assert "residual_budget = 128" in source
     assert "residual_collect_diagnostics" in source

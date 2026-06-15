@@ -23,12 +23,13 @@ from transformers.cache_utils import Cache
 
 from .residual_cache import compact_dynamic_cache
 from .residual_errors import NoResidualOpportunity
+from .residual_gating import decide_residual_gate
 from .residual_generate import (
     build_residual_candidate_groups,
     build_residual_edge_records,
     build_residual_opportunity,
 )
-from .residual_surrogate import build_residual_ddtree
+from .residual_surrogate import build_residual_ddtree, estimate_depth_mass_eal
 from .residual_tree_verify import (
     linearize_residual_tree,
     parent_indices,
@@ -381,189 +382,214 @@ def dflash_generate(
                     tree_walk.accepted_count + 1 :
                 ]
                 if enable_residual and remaining_candidate_groups:
-                    residual_anchor = VerificationAnchor(
-                        token_id=int(tree_walk.mismatch_token_id),
-                        position=int(primary_mismatch_position),
+                    residual_estimated_gain = estimate_depth_mass_eal(
+                        remaining_candidate_groups
                     )
-                    residual_tree = build_residual_ddtree(
-                        residual_anchor,
-                        remaining_candidate_groups,
-                        budget=residual_budget,
+                    residual_target_seconds_estimate = (
+                        float(residual_target_seconds)
+                        if residual_target_seconds is not None
+                        else tree_target_seconds
                     )
-                    residual_nodes = linearize_residual_tree(residual_tree)
-                    if residual_nodes:
-                        residual_attempt_count += 1
-                        residual_runs += 1
-                        residual_tree_node_sum += len(residual_nodes)
-                        residual_estimated_gain = float(
-                            residual_tree.expected_accept_length
-                        )
-                        residual_effective_gain = (
-                            residual_estimated_gain * residual_gain_scale
-                        )
-                        residual_estimated_gain_sum += residual_estimated_gain
-                        residual_effective_gain_sum += residual_effective_gain
+                    residual_gate = decide_residual_gate(
+                        current_accepted=int(tree_walk.accepted_count + 1),
+                        draft_seconds=float(measured_draft_seconds or 1e-9),
+                        target_seconds=tree_target_seconds,
+                        estimated_residual_gain=residual_estimated_gain,
+                        residual_target_seconds=residual_target_seconds_estimate,
+                        residual_gain_scale=residual_gain_scale,
+                        min_residual_gain=residual_min_gain,
+                        min_throughput_margin=residual_min_margin,
+                    )
+                    residual_attempt_count += 1
+                    if not residual_gate.should_run:
+                        residual_gate_off_count += 1
+                    residual_estimated_gain_sum += residual_estimated_gain
+                    residual_effective_gain_sum += (
+                        residual_gate.effective_estimated_residual_gain
+                    )
+                    residual_baseline_throughput_sum += residual_gate.baseline_throughput
+                    residual_predicted_throughput_sum += (
+                        residual_gate.predicted_residual_throughput
+                    )
+                    residual_target_seconds_sum += residual_gate.residual_target_seconds
+                    residual_gate_record = None
+                    if residual_collect_diagnostics:
+                        residual_gate_record = {
+                            "start": int(primary_mismatch_position),
+                            "acceptance_length": int(tree_walk.accepted_count),
+                            "current_accepted": int(tree_walk.accepted_count + 1),
+                            "estimated_residual_gain": residual_estimated_gain,
+                            "effective_estimated_residual_gain": float(
+                                residual_gate.effective_estimated_residual_gain
+                            ),
+                            "baseline_throughput": float(
+                                residual_gate.baseline_throughput
+                            ),
+                            "predicted_residual_throughput": float(
+                                residual_gate.predicted_residual_throughput
+                            ),
+                            "should_run": bool(residual_gate.should_run),
+                            "reason": residual_gate.reason,
+                            "tree_nodes": 0,
+                            "draft_seconds": float(residual_gate.draft_seconds),
+                            "target_seconds": float(residual_gate.target_seconds),
+                            "residual_target_seconds": float(
+                                residual_gate.residual_target_seconds
+                            ),
+                            "residual_gain_scale": float(
+                                residual_gate.residual_gain_scale
+                            ),
+                            "residual_min_gain": float(residual_gate.min_residual_gain),
+                            "residual_min_margin": float(
+                                residual_gate.min_throughput_margin
+                            ),
+                            "eal_estimator": "depth_mass",
+                            "verification_mode": "residual_gate",
+                        }
+                        residual_gate_records.append(residual_gate_record)
 
-                        residual_tree_ids = torch.tensor(
-                            [
-                                int(tree_walk.mismatch_token_id),
-                                *(node.token_id for node in residual_nodes),
-                            ],
-                            dtype=torch.long,
-                            device=target.device,
-                        ).unsqueeze(0)
-                        residual_tree_position_ids = torch.tensor(
-                            [
-                                int(primary_mismatch_position),
-                                *(node.position for node in residual_nodes),
-                            ],
-                            dtype=torch.long,
-                            device=target.device,
-                        ).unsqueeze(0)
-                        residual_tree_target_start = (
-                            _cuda_time()
-                            if residual_target_seconds is None
-                            else None
+                    if residual_gate.should_run:
+                        residual_anchor = VerificationAnchor(
+                            token_id=int(tree_walk.mismatch_token_id),
+                            position=int(primary_mismatch_position),
                         )
-                        residual_tree_output = target(
-                            residual_tree_ids,
-                            position_ids=residual_tree_position_ids,
-                            attention_mask=_tree_attention_mask(
-                                parent_indices(residual_nodes),
-                                past_length=int(primary_mismatch_position),
+                        residual_tree = build_residual_ddtree(
+                            residual_anchor,
+                            remaining_candidate_groups,
+                            budget=residual_budget,
+                        )
+                        residual_nodes = linearize_residual_tree(residual_tree)
+                        if residual_nodes:
+                            residual_runs += 1
+                            residual_tree_node_sum += len(residual_nodes)
+                            if residual_gate_record is not None:
+                                residual_gate_record["tree_nodes"] = len(residual_nodes)
+
+                            residual_tree_ids = torch.tensor(
+                                [
+                                    int(tree_walk.mismatch_token_id),
+                                    *(node.token_id for node in residual_nodes),
+                                ],
+                                dtype=torch.long,
                                 device=target.device,
-                                dtype=tree_output_dtype,
-                            ),
-                            past_key_values=past_key_values_target,
-                            use_cache=True,
-                            output_hidden_states=True,
-                        )
-                        residual_tree_target_seconds = (
-                            float(residual_target_seconds)
-                            if residual_target_seconds is not None
-                            else _cuda_time() - residual_tree_target_start
-                        )
-                        residual_target_seconds_sum += residual_tree_target_seconds
-                        residual_tree_posterior = sample(
-                            residual_tree_output.logits, temperature
-                        )
-                        residual_tree_walk = walk_residual_tree(
-                            residual_nodes,
-                            target_token_ids_by_flat_index=tuple(
-                                int(token_id)
-                                for token_id in residual_tree_posterior[0]
-                                .detach()
-                                .cpu()
-                                .tolist()
-                            ),
-                        )
-                        residual_realized_tokens = residual_tree_walk.accepted_count + 1
-                        residual_denominator = (
-                            float(measured_draft_seconds or 1e-9)
-                            + residual_tree_target_seconds
-                        )
-                        residual_baseline_throughput_sum += (
-                            residual_realized_tokens / max(residual_denominator, 1e-9)
-                        )
-                        residual_predicted_throughput_sum += (
-                            residual_realized_tokens + residual_effective_gain
-                        ) / max(residual_denominator, 1e-9)
-                        for edge_record in residual_tree_walk.edge_records:
-                            residual_edge_count += 1
-                            residual_edge_accepted_count += int(
-                                bool(edge_record.get("accepted", False))
+                            ).unsqueeze(0)
+                            residual_tree_position_ids = torch.tensor(
+                                [
+                                    int(primary_mismatch_position),
+                                    *(node.position for node in residual_nodes),
+                                ],
+                                dtype=torch.long,
+                                device=target.device,
+                            ).unsqueeze(0)
+                            residual_tree_target_start = (
+                                _cuda_time()
+                                if residual_target_seconds is None
+                                else None
                             )
-                            residual_edge_probability_sum += float(
-                                edge_record.get("edge_probability", 0.0)
+                            residual_tree_output = target(
+                                residual_tree_ids,
+                                position_ids=residual_tree_position_ids,
+                                attention_mask=_tree_attention_mask(
+                                    parent_indices(residual_nodes),
+                                    past_length=int(primary_mismatch_position),
+                                    device=target.device,
+                                    dtype=tree_output_dtype,
+                                ),
+                                past_key_values=past_key_values_target,
+                                use_cache=True,
+                                output_hidden_states=True,
                             )
-                            if residual_collect_diagnostics:
-                                residual_edge_records.append(
-                                    {
-                                        **edge_record,
-                                        "start": int(primary_mismatch_position),
-                                        "acceptance_length": int(
-                                            residual_tree_walk.accepted_count
-                                        ),
-                                        "current_accepted": int(
-                                            residual_tree_walk.accepted_count + 1
-                                        ),
-                                        "residual_run_index": int(residual_runs),
-                                        "estimated_residual_gain": residual_estimated_gain,
-                                        "effective_estimated_residual_gain": residual_effective_gain,
-                                        "verification_mode": "residual_tree",
-                                    }
+                            residual_tree_target_seconds = (
+                                float(residual_target_seconds)
+                                if residual_target_seconds is not None
+                                else _cuda_time() - residual_tree_target_start
+                            )
+                            residual_tree_posterior = sample(
+                                residual_tree_output.logits, temperature
+                            )
+                            residual_tree_walk = walk_residual_tree(
+                                residual_nodes,
+                                target_token_ids_by_flat_index=tuple(
+                                    int(token_id)
+                                    for token_id in residual_tree_posterior[0]
+                                    .detach()
+                                    .cpu()
+                                    .tolist()
+                                ),
+                            )
+                            for edge_record in residual_tree_walk.edge_records:
+                                residual_edge_count += 1
+                                residual_edge_accepted_count += int(
+                                    bool(edge_record.get("accepted", False))
                                 )
-                        if residual_collect_diagnostics:
-                            residual_gate_records.append(
-                                {
-                                    "start": int(primary_mismatch_position),
-                                    "acceptance_length": int(
-                                        residual_tree_walk.accepted_count
-                                    ),
-                                    "current_accepted": int(
-                                        residual_tree_walk.accepted_count + 1
-                                    ),
-                                    "estimated_residual_gain": residual_estimated_gain,
-                                    "effective_estimated_residual_gain": residual_effective_gain,
-                                    "baseline_throughput": residual_baseline_throughput_sum
-                                    / residual_attempt_count,
-                                    "predicted_residual_throughput": residual_predicted_throughput_sum
-                                    / residual_attempt_count,
-                                    "should_run": True,
-                                    "reason": "residual_ddtree_after_primary",
-                                    "tree_nodes": int(len(residual_nodes)),
-                                    "draft_seconds": float(
-                                        measured_draft_seconds or 1e-9
-                                    ),
-                                    "target_seconds": residual_tree_target_seconds,
-                                    "residual_target_seconds": residual_tree_target_seconds,
-                                    "residual_gain_scale": float(residual_gain_scale),
-                                    "residual_min_gain": float(residual_min_gain),
-                                    "residual_min_margin": float(residual_min_margin),
-                                    "eal_estimator": "ddtree",
-                                }
-                            )
+                                residual_edge_probability_sum += float(
+                                    edge_record.get("edge_probability", 0.0)
+                                )
+                                if residual_collect_diagnostics:
+                                    residual_edge_records.append(
+                                        {
+                                            **edge_record,
+                                            "start": int(primary_mismatch_position),
+                                            "acceptance_length": int(
+                                                residual_tree_walk.accepted_count
+                                            ),
+                                            "current_accepted": int(
+                                                residual_tree_walk.accepted_count + 1
+                                            ),
+                                            "residual_run_index": int(residual_runs),
+                                            "estimated_residual_gain": residual_estimated_gain,
+                                            "effective_estimated_residual_gain": float(
+                                                residual_gate.effective_estimated_residual_gain
+                                            ),
+                                            "verification_mode": "residual_tree",
+                                        }
+                                    )
 
-                        residual_accepted_indices = [
-                            0,
-                            *(
-                                node.flat_index
-                                for node in residual_tree_walk.accepted_nodes
-                            ),
-                        ]
-                        residual_accepted_index_tensor = torch.tensor(
-                            residual_accepted_indices,
-                            dtype=torch.long,
-                            device=residual_tree_ids.device,
-                        )
-                        residual_accepted_tokens = residual_tree_ids.index_select(
-                            1, residual_accepted_index_tensor
-                        )
-                        output_ids[
-                            :,
-                            primary_mismatch_position : primary_mismatch_position
-                            + residual_accepted_tokens.shape[1],
-                        ] = residual_accepted_tokens
-                        final_start = (
-                            primary_mismatch_position
-                            + residual_accepted_tokens.shape[1]
-                        )
-                        output_ids[:, final_start] = residual_tree_walk.mismatch_token_id
-                        compact_dynamic_cache(
-                            past_key_values_target,
-                            int(primary_mismatch_position),
-                            residual_accepted_indices,
-                        )
-                        residual_hidden = extract_context_feature(
-                            residual_tree_output.hidden_states, model.target_layer_ids
-                        ).index_select(1, residual_accepted_index_tensor)
-                        target_hidden = torch.cat(
-                            [primary_hidden, residual_hidden], dim=1
-                        )
-                        total_accepted_count += residual_tree_walk.accepted_count + 1
-                        if residual_target_seconds is None:
-                            target_seconds_sum += residual_tree_target_seconds
-                            target_seconds_count += 1
+                            residual_accepted_indices = [
+                                0,
+                                *(
+                                    node.flat_index
+                                    for node in residual_tree_walk.accepted_nodes
+                                ),
+                            ]
+                            residual_accepted_index_tensor = torch.tensor(
+                                residual_accepted_indices,
+                                dtype=torch.long,
+                                device=residual_tree_ids.device,
+                            )
+                            residual_accepted_tokens = residual_tree_ids.index_select(
+                                1, residual_accepted_index_tensor
+                            )
+                            output_ids[
+                                :,
+                                primary_mismatch_position : primary_mismatch_position
+                                + residual_accepted_tokens.shape[1],
+                            ] = residual_accepted_tokens
+                            final_start = (
+                                primary_mismatch_position
+                                + residual_accepted_tokens.shape[1]
+                            )
+                            output_ids[:, final_start] = (
+                                residual_tree_walk.mismatch_token_id
+                            )
+                            compact_dynamic_cache(
+                                past_key_values_target,
+                                int(primary_mismatch_position),
+                                residual_accepted_indices,
+                            )
+                            residual_hidden = extract_context_feature(
+                                residual_tree_output.hidden_states,
+                                model.target_layer_ids,
+                            ).index_select(1, residual_accepted_index_tensor)
+                            target_hidden = torch.cat(
+                                [primary_hidden, residual_hidden], dim=1
+                            )
+                            total_accepted_count += (
+                                residual_tree_walk.accepted_count + 1
+                            )
+                            if residual_target_seconds is None:
+                                target_seconds_sum += residual_tree_target_seconds
+                                target_seconds_count += 1
 
                 start = final_start
                 acceptance_lengths.append(total_accepted_count + 1)
