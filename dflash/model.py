@@ -167,7 +167,10 @@ def dflash_generate(
     while start < max_length:
         block_output_ids = output_ids[:, start : start + block_size].clone()
         block_position_ids = position_ids[:, start : start + block_size]
-        block_probabilities = [1.0]
+        block_probabilities = [1.0] * len(block_output_ids[0])
+        residual_top_ids = None
+        residual_top_probs = None
+        sampled_probs = None
         measured_draft_seconds = residual_draft_seconds
         measured_target_seconds = residual_target_seconds
         if block_size > 1:
@@ -194,6 +197,15 @@ def dflash_generate(
             past_key_values_draft.crop(start)
             sampled_draft_ids = sample(draft_logits)
             block_output_ids[:, 1:] = sampled_draft_ids
+            if enable_residual:
+                draft_probs = torch.softmax(draft_logits, dim=-1)
+                sampled_probs = torch.gather(
+                    draft_probs, -1, sampled_draft_ids.unsqueeze(-1)
+                ).squeeze(-1)
+                topk = min(int(residual_tree_width), int(draft_probs.shape[-1]))
+                residual_top_probs, residual_top_ids = torch.topk(
+                    draft_probs, k=topk, dim=-1
+                )
             if draft_prefill and return_stats:
                 draft_prefill = False
                 decode_start = _cuda_time()
@@ -234,30 +246,30 @@ def dflash_generate(
         if enable_residual and block_size > 2 and acceptance_length < block_size - 1:
             tail_start_row = int(acceptance_length + 1)
             residual_candidate_groups = ()
-            if tail_start_row < int(draft_logits.shape[1]):
-                tail_logits = draft_logits[:, tail_start_row:, :]
-                tail_probs = torch.softmax(tail_logits, dim=-1)
-                tail_sampled_ids = sampled_draft_ids[:, tail_start_row:]
-                tail_sampled_probs = torch.gather(
-                    tail_probs, -1, tail_sampled_ids.unsqueeze(-1)
-                ).squeeze(-1)
-                block_probabilities = [1.0] * len(block_output_ids[0])
-                for offset, probability in enumerate(
-                    tail_sampled_probs[0].detach().cpu().tolist()
+            if sampled_probs is not None:
+                for row_index, probability in enumerate(
+                    sampled_probs[0].detach().cpu().tolist()
                 ):
-                    block_probabilities[tail_start_row + 1 + offset] = float(
-                        probability
-                    )
-                topk = min(int(residual_tree_width), int(tail_probs.shape[-1]))
-                top_probs, top_ids = torch.topk(tail_probs, k=topk, dim=-1)
+                    block_probabilities[row_index + 1] = float(probability)
+            if (
+                residual_top_ids is not None
+                and residual_top_probs is not None
+                and tail_start_row < int(residual_top_ids.shape[1])
+            ):
                 residual_candidate_groups = build_residual_candidate_groups(
                     top_token_ids_by_block=tuple(
                         tuple(int(x) for x in row)
-                        for row in top_ids[0].detach().cpu().tolist()
+                        for row in residual_top_ids[0, tail_start_row:]
+                        .detach()
+                        .cpu()
+                        .tolist()
                     ),
                     top_probabilities_by_block=tuple(
                         tuple(float(x) for x in row)
-                        for row in top_probs[0].detach().cpu().tolist()
+                        for row in residual_top_probs[0, tail_start_row:]
+                        .detach()
+                        .cpu()
+                        .tolist()
                     ),
                     start_position=int(start),
                     first_block_index=int(acceptance_length + 2),
