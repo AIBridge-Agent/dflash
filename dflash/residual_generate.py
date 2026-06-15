@@ -15,6 +15,8 @@ from .residual_surrogate import (
 )
 from .residual_types import CandidateSource, ResidualCandidate, ResidualPath
 
+ResidualEdgeRecord = dict[str, bool | float | int | str]
+
 
 @dataclass(frozen=True)
 class ResidualOpportunity:
@@ -61,6 +63,39 @@ def build_residual_candidate_groups(
         )
         groups.append(group)
     return tuple(groups)
+
+
+def build_residual_edge_records(
+    path: ResidualPath, *, residual_acceptance_length: int
+) -> tuple[ResidualEdgeRecord, ...]:
+    """Build per-edge calibration labels from one residual verification run.
+
+    Accepted residual-tail edges are observed as positive labels. The first edge
+    after the accepted prefix is observed as the first rejection. Edges after the
+    first rejection are unobserved and intentionally omitted.
+    """
+
+    if residual_acceptance_length < 0:
+        raise ValueError("residual_acceptance_length must be non-negative")
+
+    records: list[ResidualEdgeRecord] = []
+    for edge_index, candidate in enumerate(path.candidates):
+        accepted = edge_index < residual_acceptance_length
+        first_reject = edge_index == residual_acceptance_length
+        if not accepted and not first_reject:
+            break
+        records.append(
+            {
+                "edge_index": edge_index,
+                "position": candidate.position,
+                "source_block_position": candidate.source_block_position,
+                "edge_probability": float(candidate.probability),
+                "accepted": accepted,
+                "first_reject": first_reject,
+                "outcome": "accepted" if accepted else "first_rejected",
+            }
+        )
+    return tuple(records)
 
 
 def build_residual_opportunity(

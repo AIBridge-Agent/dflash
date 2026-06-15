@@ -42,6 +42,9 @@ def test_fair_benchmark_logs_gate_diagnostics() -> None:
     source = SCRIPT.read_text(encoding="utf-8")
 
     assert "residual_gate_records" in source
+    assert "residual_edge_records" in source
+    assert "residual_edge_accept_rate" in source
+    assert "mean_edge_probability" in source
     assert "gate_off_count" in source
     assert "mean_delta_hat" in source
     assert "mean_theta_base" in source

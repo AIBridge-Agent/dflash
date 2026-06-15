@@ -4,6 +4,7 @@ from pathlib import Path
 
 from dflash.residual_generate import (
     build_residual_candidate_groups,
+    build_residual_edge_records,
     build_residual_opportunity,
 )
 
@@ -60,6 +61,29 @@ def test_build_residual_opportunity_uses_residual_ddtree_when_candidate_groups_e
         == opportunity.residual_tree.expected_accept_length
     )
     assert opportunity.should_run is True
+
+
+def test_build_residual_edge_records_observes_accepts_and_first_reject() -> None:
+    opportunity = build_residual_opportunity(
+        block_token_ids=(100, 11, 22, 33, 44),
+        block_probabilities=(1.0, 0.9, 0.8, 0.7, 0.6),
+        start_position=10,
+        acceptance_length=1,
+        verifier_mismatch_token_id=99,
+        current_accepted=1,
+        draft_seconds=1.0,
+        target_seconds=1.0,
+        residual_budget=1,
+    )
+
+    records = build_residual_edge_records(
+        opportunity.path, residual_acceptance_length=1
+    )
+
+    assert [record["outcome"] for record in records] == ["accepted", "first_rejected"]
+    assert [record["edge_probability"] for record in records] == [0.7, 0.6]
+    assert records[0]["accepted"] is True
+    assert records[1]["first_reject"] is True
 
 
 def test_build_residual_opportunity_passes_explicit_residual_target_cost() -> None:
@@ -131,6 +155,8 @@ def test_dflash_generate_uses_residual_tail_without_second_draft_call() -> None:
     assert "residual_ids" in source
     assert "residual_runs" in source
     assert "residual_gate_records" in source
+    assert "residual_edge_records" in source
+    assert "build_residual_edge_records" in source
     assert "measured_draft_seconds" in source
     assert "measured_target_seconds" in source
     assert "target_seconds_sum" in source

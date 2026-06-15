@@ -138,6 +138,7 @@ def run_policy(
     torch.cuda.synchronize()
     wall_seconds = time.perf_counter() - start
     gate_records = list(getattr(stats, "residual_gate_records", []))
+    edge_records = list(getattr(stats, "residual_edge_records", []))
     gate_off_records = [
         record for record in gate_records if not record.get("should_run", False)
     ]
@@ -150,7 +151,11 @@ def run_policy(
         "residual_attempts": len(getattr(stats, "residual_attempts", [])),
         "residual_runs": int(getattr(stats, "residual_runs", 0)),
         "residual_gate_records": gate_records,
+        "residual_edge_records": edge_records,
         "gate_off_count": len(gate_off_records),
+        "residual_edge_count": len(edge_records),
+        "residual_edge_accept_rate": _edge_accept_rate(edge_records),
+        "mean_edge_probability": _mean_gate_field(edge_records, "edge_probability"),
         "mean_delta_hat": _mean_gate_field(gate_records, "estimated_residual_gain"),
         "mean_theta_base": _mean_gate_field(gate_records, "baseline_throughput"),
         "mean_theta_res_hat": _mean_gate_field(
@@ -178,6 +183,34 @@ def _mean_gate_field(records: list[dict[str, Any]], field: str) -> float:
     return statistics.fmean(values) if values else 0.0
 
 
+def _edge_accept_rate(records: list[dict[str, Any]]) -> float:
+    if not records:
+        return 0.0
+    return statistics.fmean(
+        1.0 if record.get("accepted") else 0.0 for record in records
+    )
+
+
+def _weighted_edge_accept_rate(rows: list[dict[str, Any]]) -> float:
+    accepted = sum(
+        float(row.get("residual_edge_accept_rate", 0.0))
+        * int(row.get("residual_edge_count", 0))
+        for row in rows
+    )
+    total = sum(int(row.get("residual_edge_count", 0)) for row in rows)
+    return accepted / total if total else 0.0
+
+
+def _weighted_edge_probability(rows: list[dict[str, Any]]) -> float:
+    probability = sum(
+        float(row.get("mean_edge_probability", 0.0))
+        * int(row.get("residual_edge_count", 0))
+        for row in rows
+    )
+    total = sum(int(row.get("residual_edge_count", 0)) for row in rows)
+    return probability / total if total else 0.0
+
+
 def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
     summary: dict[str, Any] = {}
     for dataset in sorted({row["dataset"] for row in rows}):
@@ -203,6 +236,11 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
                 "gate_off_count": sum(
                     int(row.get("gate_off_count", 0)) for row in policy_rows
                 ),
+                "residual_edge_count": sum(
+                    int(row.get("residual_edge_count", 0)) for row in policy_rows
+                ),
+                "residual_edge_accept_rate": _weighted_edge_accept_rate(policy_rows),
+                "mean_edge_probability": _weighted_edge_probability(policy_rows),
                 "mean_delta_hat": statistics.fmean(
                     float(row.get("mean_delta_hat", 0.0)) for row in policy_rows
                 )

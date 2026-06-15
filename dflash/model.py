@@ -24,6 +24,7 @@ from transformers.cache_utils import Cache
 from .residual_errors import NoResidualOpportunity
 from .residual_generate import (
     build_residual_candidate_groups,
+    build_residual_edge_records,
     build_residual_opportunity,
 )
 
@@ -126,6 +127,7 @@ def dflash_generate(
     acceptance_lengths = []
     residual_attempts = []
     residual_gate_records = []
+    residual_edge_records = []
     residual_runs = 0
     start = num_input_tokens
     draft_prefill = True
@@ -327,6 +329,25 @@ def dflash_generate(
                         .sum(dim=1)[0]
                         .item()
                     )
+                    for edge_record in build_residual_edge_records(
+                        opportunity.path,
+                        residual_acceptance_length=int(residual_acceptance_length),
+                    ):
+                        residual_edge_records.append(
+                            {
+                                **edge_record,
+                                "start": int(start),
+                                "acceptance_length": int(acceptance_length),
+                                "current_accepted": int(acceptance_length + 1),
+                                "residual_run_index": int(residual_runs),
+                                "estimated_residual_gain": float(
+                                    opportunity.estimated_residual_gain
+                                ),
+                                "effective_estimated_residual_gain": float(
+                                    opportunity.gate.effective_estimated_residual_gain
+                                ),
+                            }
+                        )
                     residual_start = start + acceptance_length + 1
                     output_ids[
                         :,
@@ -402,6 +423,7 @@ def dflash_generate(
         acceptance_lengths=acceptance_lengths,
         residual_attempts=residual_attempts,
         residual_gate_records=residual_gate_records,
+        residual_edge_records=residual_edge_records,
         residual_runs=residual_runs,
     )
 
