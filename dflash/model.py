@@ -27,6 +27,11 @@ from .residual_generate import (
     build_residual_edge_records,
     build_residual_opportunity,
 )
+from .residual_tree_verify import (
+    linearize_residual_tree,
+    parent_indices,
+    walk_residual_tree,
+)
 
 # ---------------------------------------------------------------------------
 # Model utilities
@@ -66,6 +71,27 @@ def sample(logits: torch.Tensor, temperature: float = 0.0) -> torch.Tensor:
 def _cuda_time() -> float:
     torch.cuda.synchronize()
     return time.perf_counter()
+
+
+def _tree_attention_mask(
+    parents: tuple[int | None, ...], *, past_length: int, device: torch.device
+) -> torch.Tensor:
+    """Build an additive tree-attention mask for flattened residual DDTree nodes."""
+
+    q_len = len(parents)
+    kv_len = past_length + q_len
+    mask = torch.zeros((1, 1, q_len, kv_len), device=device, dtype=torch.float32)
+    blocked_value = -1.0e9
+    for query_index in range(q_len):
+        allowed = set()
+        cursor: int | None = query_index
+        while cursor is not None:
+            allowed.add(cursor)
+            cursor = parents[cursor]
+        for key_index in range(q_len):
+            if key_index not in allowed:
+                mask[:, :, query_index, past_length + key_index] = blocked_value
+    return mask
 
 
 @torch.inference_mode()
@@ -295,7 +321,117 @@ def dflash_generate(
             if opportunity is not None and opportunity.should_run:
                 mismatch_block_index = acceptance_length + 1
                 residual_tail = block_output_ids[:, mismatch_block_index + 1 :]
-                if residual_tail.shape[1] > 0:
+                tree_nodes = (
+                    linearize_residual_tree(opportunity.residual_tree)
+                    if opportunity.residual_tree is not None
+                    else ()
+                )
+                if tree_nodes:
+                    residual_ran = True
+                    residual_runs += 1
+                    prefix_width = int(acceptance_length + 1)
+                    anchor_position = int(start + mismatch_block_index)
+                    output_ids[:, start : start + prefix_width] = block_output_ids[
+                        :, :prefix_width
+                    ]
+                    output_ids[:, anchor_position] = posterior[:, acceptance_length]
+
+                    past_key_values_target.crop(anchor_position)
+                    tree_ids = torch.tensor(
+                        [
+                            int(posterior[0, acceptance_length].detach().cpu().item()),
+                            *(node.token_id for node in tree_nodes),
+                        ],
+                        dtype=torch.long,
+                        device=target.device,
+                    ).unsqueeze(0)
+                    tree_position_ids = torch.tensor(
+                        [anchor_position, *(node.position for node in tree_nodes)],
+                        dtype=torch.long,
+                        device=target.device,
+                    ).unsqueeze(0)
+                    tree_parents = parent_indices(tree_nodes)
+                    tree_output = target(
+                        tree_ids,
+                        position_ids=tree_position_ids,
+                        attention_mask=_tree_attention_mask(
+                            tree_parents,
+                            past_length=anchor_position,
+                            device=target.device,
+                        ),
+                        past_key_values=past_key_values_target,
+                        use_cache=True,
+                        output_hidden_states=block_size > 1,
+                    )
+                    tree_posterior = sample(tree_output.logits, temperature)
+                    tree_walk = walk_residual_tree(
+                        tree_nodes,
+                        target_token_ids_by_flat_index=tuple(
+                            int(token_id)
+                            for token_id in tree_posterior[0].detach().cpu().tolist()
+                        ),
+                    )
+                    for edge_record in tree_walk.edge_records:
+                        residual_edge_records.append(
+                            {
+                                **edge_record,
+                                "start": int(start),
+                                "acceptance_length": int(acceptance_length),
+                                "current_accepted": int(acceptance_length + 1),
+                                "residual_run_index": int(residual_runs),
+                                "estimated_residual_gain": float(
+                                    opportunity.estimated_residual_gain
+                                ),
+                                "effective_estimated_residual_gain": float(
+                                    opportunity.gate.effective_estimated_residual_gain
+                                ),
+                                "verification_mode": "tree",
+                            }
+                        )
+
+                    accepted_token_ids = [
+                        node.token_id for node in tree_walk.accepted_nodes
+                    ]
+                    residual_start = anchor_position
+                    if accepted_token_ids:
+                        output_ids[
+                            :,
+                            residual_start + 1 : residual_start
+                            + 1
+                            + len(accepted_token_ids),
+                        ] = torch.tensor(
+                            accepted_token_ids,
+                            dtype=torch.long,
+                            device=target.device,
+                        ).unsqueeze(0)
+                    mismatch_position = residual_start + len(accepted_token_ids) + 1
+                    output_ids[:, mismatch_position] = tree_walk.mismatch_token_id
+
+                    past_key_values_target.crop(anchor_position)
+                    replay_ids = output_ids[:, residual_start:mismatch_position]
+                    replay_output = target(
+                        replay_ids,
+                        position_ids=position_ids[:, residual_start:mismatch_position],
+                        past_key_values=past_key_values_target,
+                        use_cache=True,
+                        output_hidden_states=block_size > 1,
+                    )
+                    start = mismatch_position
+                    past_key_values_target.crop(start)
+                    acceptance_lengths.append(
+                        acceptance_length + tree_walk.accepted_count + 2
+                    )
+                    if block_size > 1:
+                        prefix_hidden = extract_context_feature(
+                            output.hidden_states, model.target_layer_ids
+                        )[:, : acceptance_length + 1, :]
+                        residual_hidden = extract_context_feature(
+                            replay_output.hidden_states, model.target_layer_ids
+                        )
+                        target_hidden = torch.cat(
+                            [prefix_hidden, residual_hidden], dim=1
+                        )
+                elif residual_tail.shape[1] > 0:
                     residual_ran = True
                     residual_runs += 1
                     output_ids[:, start : start + acceptance_length + 1] = (
@@ -346,6 +482,7 @@ def dflash_generate(
                                 "effective_estimated_residual_gain": float(
                                     opportunity.gate.effective_estimated_residual_gain
                                 ),
+                                "verification_mode": "path",
                             }
                         )
                     residual_start = start + acceptance_length + 1

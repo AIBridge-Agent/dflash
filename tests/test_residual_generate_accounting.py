@@ -157,6 +157,10 @@ def test_dflash_generate_uses_residual_tail_without_second_draft_call() -> None:
     assert "residual_gate_records" in source
     assert "residual_edge_records" in source
     assert "build_residual_edge_records" in source
+    assert "linearize_residual_tree" in source
+    assert "walk_residual_tree" in source
+    assert "_tree_attention_mask" in source
+    assert "verification_mode" in source
     assert "measured_draft_seconds" in source
     assert "measured_target_seconds" in source
     assert "target_seconds_sum" in source
