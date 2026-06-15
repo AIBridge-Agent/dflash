@@ -4,6 +4,7 @@ import pytest
 from dflash.residual_errors import InvalidBudgetError
 from dflash.residual_surrogate import (
     build_residual_ddtree,
+    estimate_depth_mass_eal,
     estimate_residual_gain,
     select_residual_paths,
     score_path,
@@ -57,6 +58,20 @@ def test_budget_truncates_paths_deterministically_by_score_then_tokens() -> None
     selected = select_residual_paths([tie_b, high, tie_a], budget=2)
 
     assert selected == (high, tie_a)
+
+
+def test_depth_mass_eal_uses_topk_mass_without_tree_materialization() -> None:
+    depth1 = (
+        ResidualCandidate(1, 11, 0.4, CandidateSource.DRAFT_TAIL, 1),
+        ResidualCandidate(2, 11, 0.3, CandidateSource.DRAFT_TAIL, 1),
+    )
+    depth2 = (
+        ResidualCandidate(3, 12, 0.5, CandidateSource.DRAFT_TAIL, 2),
+        ResidualCandidate(4, 12, 0.25, CandidateSource.DRAFT_TAIL, 2),
+    )
+
+    # EAL = (0.4 + 0.3) + (0.4 + 0.3) * (0.5 + 0.25).
+    assert estimate_depth_mass_eal((depth1, depth2)) == pytest.approx(1.225)
 
 
 def test_residual_ddtree_expected_accept_length_sums_tree_prefix_nodes() -> None:

@@ -15,11 +15,13 @@ def test_benchmark_exposes_residual_flags_and_passes_them_to_generate() -> None:
         "--residual-budget",
         "--residual-draft-seconds",
         "--residual-target-seconds",
+        "--residual-diagnostics",
     ]:
         assert flag in source
 
     assert "enable_residual=args.enable_residual" in source
     assert "residual_budget=args.residual_budget" in source
+    assert "residual_collect_diagnostics=args.residual_diagnostics" in source
 
 
 def test_qwen3_8b_residual_config_records_dataset_schema_and_fair_eval() -> None:

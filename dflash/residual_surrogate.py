@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import heapq
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
@@ -40,6 +41,24 @@ def score_path(path: ResidualPath) -> float:
     return expected_length
 
 
+def estimate_depth_mass_eal(candidate_groups: Sequence[Sequence]) -> float:
+    """Cheap residual EAL upper estimate from per-depth top-k probability mass.
+
+    For each residual-tail depth d, let p_d be the sum of the selected top-k
+    edge probabilities at that depth, clipped to 1. The estimate is the prefix
+    expected accepted length: p_1 + p_1 p_2 + ... . This avoids constructing a
+    DDTree before the gate decides whether residual verification is worthwhile.
+    """
+
+    running_product = 1.0
+    expected_length = 0.0
+    for group in candidate_groups:
+        depth_mass = min(1.0, sum(float(candidate.probability) for candidate in group))
+        running_product *= depth_mass
+        expected_length += running_product
+    return expected_length
+
+
 def build_residual_ddtree(
     anchor: VerificationAnchor,
     candidate_groups: Sequence[Sequence],
@@ -59,32 +78,43 @@ def build_residual_ddtree(
     if not candidate_groups:
         return ResidualDDTree(nodes=())
 
-    frontier: list[tuple[ResidualPath, float, tuple[int, ...], tuple[int, ...]]] = []
+    frontier: list[
+        tuple[float, tuple[int, ...], tuple[int, ...], int, int, tuple]
+    ] = []
+    insertion_order = 0
     for candidate in candidate_groups[0]:
-        path = ResidualPath(anchor=anchor, candidates=(candidate,))
-        frontier.append(_frontier_item(path))
+        heapq.heappush(frontier, _frontier_item((candidate,), insertion_order))
+        insertion_order += 1
 
     selected: list[ResidualPath] = []
     while frontier and len(selected) < budget:
-        frontier.sort(key=lambda item: (-item[1], item[2], item[3]))
-        path, _, _, _ = frontier.pop(0)
-        selected.append(path)
-        depth = path.length
+        _, _, _, depth, _, candidates = heapq.heappop(frontier)
+        selected.append(ResidualPath(anchor=anchor, candidates=candidates))
         if depth >= len(candidate_groups):
             continue
         for candidate in candidate_groups[depth]:
-            child = ResidualPath(anchor=anchor, candidates=(*path.candidates, candidate))
-            frontier.append(_frontier_item(child))
+            heapq.heappush(
+                frontier, _frontier_item((*candidates, candidate), insertion_order)
+            )
+            insertion_order += 1
 
     return ResidualDDTree(nodes=tuple(selected))
 
 
-def _frontier_item(path: ResidualPath) -> tuple[ResidualPath, float, tuple[int, ...], tuple[int, ...]]:
+def _frontier_item(
+    candidates: tuple,
+    insertion_order: int,
+) -> tuple[float, tuple[int, ...], tuple[int, ...], int, int, tuple]:
+    probability_product = 1.0
+    for candidate in candidates:
+        probability_product *= float(candidate.probability)
     return (
-        path,
-        path.probability_product,
-        tuple(candidate.token_id for candidate in path.candidates),
-        tuple(candidate.source_block_position for candidate in path.candidates),
+        -probability_product,
+        tuple(candidate.token_id for candidate in candidates),
+        tuple(candidate.source_block_position for candidate in candidates),
+        len(candidates),
+        insertion_order,
+        candidates,
     )
 
 
@@ -96,7 +126,9 @@ def estimate_residual_tree_gain(
 ) -> float:
     """Estimate residual gain by constructing a residual DDTree."""
 
-    return build_residual_ddtree(anchor, candidate_groups, budget=budget).expected_accept_length
+    return build_residual_ddtree(
+        anchor, candidate_groups, budget=budget
+    ).expected_accept_length
 
 
 def select_residual_paths(

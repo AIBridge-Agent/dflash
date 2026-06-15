@@ -309,6 +309,7 @@ def _run_transformers(args: argparse.Namespace) -> None:
                     residual_min_margin=args.residual_min_margin,
                     residual_draft_seconds=args.residual_draft_seconds,
                     residual_target_seconds=args.residual_target_seconds,
+                    residual_collect_diagnostics=args.residual_diagnostics,
                 )
 
             spec_response = response[block_size]
@@ -570,12 +571,17 @@ def main() -> None:
     parser.add_argument("--max-samples", type=int, default=None)
     parser.add_argument("--enable-residual", action="store_true")
     parser.add_argument("--residual-budget", type=int, default=64)
-    parser.add_argument("--residual-tree-width", type=int, default=4)
+    parser.add_argument("--residual-tree-width", type=int, default=5)
     parser.add_argument("--residual-gain-scale", type=float, default=0.6)
     parser.add_argument("--residual-min-gain", type=float, default=3.0)
     parser.add_argument("--residual-min-margin", type=float, default=0.2)
     parser.add_argument("--residual-draft-seconds", type=float, default=None)
     parser.add_argument("--residual-target-seconds", type=float, default=None)
+    parser.add_argument(
+        "--residual-diagnostics",
+        action="store_true",
+        help="Store detailed residual gate/edge records in transformer stats.",
+    )
 
     parser.add_argument("--base-url", type=str, default="http://127.0.0.1:30000")
     parser.add_argument("--num-prompts", type=int, default=1024)

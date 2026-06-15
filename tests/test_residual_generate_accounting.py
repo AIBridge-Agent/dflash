@@ -31,7 +31,7 @@ def test_build_residual_opportunity_from_dflash_block_accounting() -> None:
     assert opportunity.path.anchor.token_id == 99
 
 
-def test_build_residual_opportunity_uses_residual_ddtree_when_candidate_groups_exist() -> (
+def test_build_residual_opportunity_uses_depth_mass_eal_when_candidate_groups_exist() -> (
     None
 ):
     groups = build_residual_candidate_groups(
@@ -54,12 +54,10 @@ def test_build_residual_opportunity_uses_residual_ddtree_when_candidate_groups_e
         residual_candidate_groups=groups,
     )
 
-    assert opportunity.residual_tree is not None
-    assert opportunity.tree_nodes == 4
-    assert (
-        opportunity.estimated_residual_gain
-        == opportunity.residual_tree.expected_accept_length
-    )
+    assert opportunity.residual_tree is None
+    assert opportunity.tree_nodes == 0
+    # EAL = (0.95 + 0.5 clipped to 1.0) + 1.0 * (0.9 + 0.4 clipped to 1.0).
+    assert opportunity.estimated_residual_gain == 2.0
     assert opportunity.should_run is True
 
 
@@ -136,6 +134,7 @@ def test_dflash_generate_exposes_residual_opt_in_flags() -> None:
     assert "residual_gain_scale" in arg_names
     assert "residual_min_gain" in arg_names
     assert "residual_min_margin" in arg_names
+    assert "residual_collect_diagnostics" in arg_names
 
 
 def test_dflash_generate_does_not_swallow_domain_errors() -> None:
@@ -161,6 +160,8 @@ def test_dflash_generate_uses_residual_tail_without_second_draft_call() -> None:
     assert "walk_residual_tree" in source
     assert "_tree_attention_mask" in source
     assert "compact_dynamic_cache" in source
+    assert "build_residual_ddtree" in source
+    assert "residual_collect_diagnostics" in source
     assert "verification_mode" in source
     assert "replay_output" not in source
     assert "measured_draft_seconds" in source

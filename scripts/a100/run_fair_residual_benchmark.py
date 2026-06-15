@@ -198,6 +198,7 @@ def run_policy(
     residual_min_margin: float,
     residual_draft_seconds: float | None,
     residual_target_seconds: float | None,
+    residual_collect_diagnostics: bool,
 ) -> dict[str, Any]:
     reset_gpu_state()
     enable_residual = policy == "dflash_block16_residual"
@@ -219,38 +220,111 @@ def run_policy(
         residual_min_margin=residual_min_margin,
         residual_draft_seconds=residual_draft_seconds,
         residual_target_seconds=residual_target_seconds,
+        residual_collect_diagnostics=residual_collect_diagnostics,
     )
     torch.cuda.synchronize()
     wall_seconds = time.perf_counter() - start
     gate_records = list(getattr(stats, "residual_gate_records", []))
     edge_records = list(getattr(stats, "residual_edge_records", []))
-    gate_off_records = [
-        record for record in gate_records if not record.get("should_run", False)
-    ]
+    residual_attempt_count = int(
+        getattr(
+            stats,
+            "residual_attempt_count",
+            len(getattr(stats, "residual_attempts", [])),
+        )
+    )
+    gate_off_count = int(
+        getattr(
+            stats,
+            "residual_gate_off_count",
+            len(
+                [
+                    record
+                    for record in gate_records
+                    if not record.get("should_run", False)
+                ]
+            ),
+        )
+    )
+    residual_edge_count = int(getattr(stats, "residual_edge_count", len(edge_records)))
+    residual_edge_accepted_count = int(
+        getattr(
+            stats,
+            "residual_edge_accepted_count",
+            sum(1 for record in edge_records if record.get("accepted")),
+        )
+    )
+    residual_edge_probability_sum = float(
+        getattr(
+            stats,
+            "residual_edge_probability_sum",
+            sum(float(record.get("edge_probability", 0.0)) for record in edge_records),
+        )
+    )
     row = {
         "policy": policy,
         "output_tokens": int(stats.num_output_tokens),
         "wall_seconds": wall_seconds,
         "tokens_per_second": float(stats.num_output_tokens / max(wall_seconds, 1e-9)),
         "acceptance_lengths": list(stats.acceptance_lengths),
-        "residual_attempts": len(getattr(stats, "residual_attempts", [])),
+        "residual_attempts": residual_attempt_count,
         "residual_runs": int(getattr(stats, "residual_runs", 0)),
         "residual_gate_records": gate_records,
         "residual_edge_records": edge_records,
-        "gate_off_count": len(gate_off_records),
-        "residual_edge_count": len(edge_records),
-        "residual_edge_accept_rate": _edge_accept_rate(edge_records),
-        "mean_edge_probability": _mean_gate_field(edge_records, "edge_probability"),
-        "mean_delta_hat": _mean_gate_field(gate_records, "estimated_residual_gain"),
-        "mean_theta_base": _mean_gate_field(gate_records, "baseline_throughput"),
-        "mean_theta_res_hat": _mean_gate_field(
-            gate_records, "predicted_residual_throughput"
+        "gate_off_count": gate_off_count,
+        "residual_edge_count": residual_edge_count,
+        "residual_edge_accept_rate": (
+            residual_edge_accepted_count / residual_edge_count
+            if residual_edge_count
+            else 0.0
         ),
-        "mean_effective_delta_hat": _mean_gate_field(
-            gate_records, "effective_estimated_residual_gain"
+        "mean_edge_probability": (
+            residual_edge_probability_sum / residual_edge_count
+            if residual_edge_count
+            else 0.0
         ),
-        "mean_t_res": _mean_gate_field(gate_records, "residual_target_seconds"),
-        "mean_tree_nodes": _mean_gate_field(gate_records, "tree_nodes"),
+        "mean_delta_hat": _mean_stat_sum(
+            stats,
+            "residual_estimated_gain_sum",
+            residual_attempt_count,
+            gate_records,
+            "estimated_residual_gain",
+        ),
+        "mean_theta_base": _mean_stat_sum(
+            stats,
+            "residual_baseline_throughput_sum",
+            residual_attempt_count,
+            gate_records,
+            "baseline_throughput",
+        ),
+        "mean_theta_res_hat": _mean_stat_sum(
+            stats,
+            "residual_predicted_throughput_sum",
+            residual_attempt_count,
+            gate_records,
+            "predicted_residual_throughput",
+        ),
+        "mean_effective_delta_hat": _mean_stat_sum(
+            stats,
+            "residual_effective_gain_sum",
+            residual_attempt_count,
+            gate_records,
+            "effective_estimated_residual_gain",
+        ),
+        "mean_t_res": _mean_stat_sum(
+            stats,
+            "residual_target_seconds_sum",
+            residual_attempt_count,
+            gate_records,
+            "residual_target_seconds",
+        ),
+        "mean_tree_nodes": _mean_stat_sum(
+            stats,
+            "residual_tree_node_sum",
+            residual_attempt_count,
+            gate_records,
+            "tree_nodes",
+        ),
         "residual_budget": residual_budget,
         "residual_tree_width": residual_tree_width,
         "residual_gain_scale": residual_gain_scale,
@@ -258,6 +332,7 @@ def run_policy(
         "residual_min_margin": residual_min_margin,
         "residual_draft_seconds": residual_draft_seconds,
         "residual_target_seconds": residual_target_seconds,
+        "residual_collect_diagnostics": residual_collect_diagnostics,
         "peak_memory_mib": float(torch.cuda.max_memory_allocated() / 1024 / 1024),
     }
     del stats
@@ -268,6 +343,18 @@ def run_policy(
 def _mean_gate_field(records: list[dict[str, Any]], field: str) -> float:
     values = [float(record[field]) for record in records if field in record]
     return statistics.fmean(values) if values else 0.0
+
+
+def _mean_stat_sum(
+    stats: Any,
+    sum_field: str,
+    count: int,
+    fallback_records: list[dict[str, Any]],
+    fallback_field: str,
+) -> float:
+    if hasattr(stats, sum_field):
+        return float(getattr(stats, sum_field)) / count if count else 0.0
+    return _mean_gate_field(fallback_records, fallback_field)
 
 
 def _edge_accept_rate(records: list[dict[str, Any]]) -> float:
@@ -382,12 +469,17 @@ def main() -> None:
     parser.add_argument("--start-with-residual", action="store_true")
     parser.add_argument("--max-new-tokens", type=int, default=256)
     parser.add_argument("--residual-budget", type=int, default=64)
-    parser.add_argument("--residual-tree-width", type=int, default=4)
+    parser.add_argument("--residual-tree-width", type=int, default=5)
     parser.add_argument("--residual-gain-scale", type=float, default=0.6)
     parser.add_argument("--residual-min-gain", type=float, default=3.0)
     parser.add_argument("--residual-min-margin", type=float, default=0.2)
     parser.add_argument("--residual-draft-seconds", type=float, default=None)
     parser.add_argument("--residual-target-seconds", type=float, default=None)
+    parser.add_argument(
+        "--residual-diagnostics",
+        action="store_true",
+        help="Store per-gate and per-edge diagnostic records in JSONL rows.",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--output-dir", type=Path, default=Path("results/residual_fair_benchmark")
@@ -457,6 +549,7 @@ def main() -> None:
                     residual_min_margin=args.residual_min_margin,
                     residual_draft_seconds=args.residual_draft_seconds,
                     residual_target_seconds=args.residual_target_seconds,
+                    residual_collect_diagnostics=args.residual_diagnostics,
                 )
                 row.update(
                     {

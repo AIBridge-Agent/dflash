@@ -28,6 +28,7 @@ from .residual_generate import (
     build_residual_edge_records,
     build_residual_opportunity,
 )
+from .residual_surrogate import build_residual_ddtree
 from .residual_tree_verify import (
     linearize_residual_tree,
     parent_indices,
@@ -112,12 +113,13 @@ def dflash_generate(
     return_stats: bool = False,
     enable_residual: bool = False,
     residual_budget: int = 1,
-    residual_tree_width: int = 4,
+    residual_tree_width: int = 5,
     residual_gain_scale: float = 0.6,
     residual_min_gain: float = 3.0,
     residual_min_margin: float = 0.2,
     residual_draft_seconds: float | None = None,
     residual_target_seconds: float | None = None,
+    residual_collect_diagnostics: bool = True,
 ):
     num_input_tokens = input_ids.shape[1]
     max_length = num_input_tokens + max_new_tokens
@@ -160,6 +162,17 @@ def dflash_generate(
     residual_gate_records = []
     residual_edge_records = []
     residual_runs = 0
+    residual_attempt_count = 0
+    residual_gate_off_count = 0
+    residual_edge_count = 0
+    residual_edge_accepted_count = 0
+    residual_edge_probability_sum = 0.0
+    residual_estimated_gain_sum = 0.0
+    residual_effective_gain_sum = 0.0
+    residual_baseline_throughput_sum = 0.0
+    residual_predicted_throughput_sum = 0.0
+    residual_target_seconds_sum = 0.0
+    residual_tree_node_sum = 0
     start = num_input_tokens
     draft_prefill = True
     target_seconds_sum = 0.0
@@ -169,9 +182,8 @@ def dflash_generate(
         block_output_ids = output_ids[:, start : start + block_size].clone()
         block_position_ids = position_ids[:, start : start + block_size]
         block_probabilities = [1.0] * len(block_output_ids[0])
-        residual_top_ids = None
-        residual_top_probs = None
-        sampled_probs = None
+        sampled_draft_ids = None
+        draft_logits = None
         measured_draft_seconds = residual_draft_seconds
         measured_target_seconds = residual_target_seconds
         if block_size > 1:
@@ -198,15 +210,6 @@ def dflash_generate(
             past_key_values_draft.crop(start)
             sampled_draft_ids = sample(draft_logits)
             block_output_ids[:, 1:] = sampled_draft_ids
-            if enable_residual:
-                draft_probs = torch.softmax(draft_logits, dim=-1)
-                sampled_probs = torch.gather(
-                    draft_probs, -1, sampled_draft_ids.unsqueeze(-1)
-                ).squeeze(-1)
-                topk = min(int(residual_tree_width), int(draft_probs.shape[-1]))
-                residual_top_probs, residual_top_ids = torch.topk(
-                    draft_probs, k=topk, dim=-1
-                )
             if draft_prefill and return_stats:
                 draft_prefill = False
                 decode_start = _cuda_time()
@@ -247,34 +250,38 @@ def dflash_generate(
         if enable_residual and block_size > 2 and acceptance_length < block_size - 1:
             tail_start_row = int(acceptance_length + 1)
             residual_candidate_groups = ()
-            if sampled_probs is not None:
-                for row_index, probability in enumerate(
-                    sampled_probs[0].detach().cpu().tolist()
-                ):
-                    block_probabilities[row_index + 1] = float(probability)
-            if (
-                residual_top_ids is not None
-                and residual_top_probs is not None
-                and tail_start_row < int(residual_top_ids.shape[1])
-            ):
-                residual_candidate_groups = build_residual_candidate_groups(
-                    top_token_ids_by_block=tuple(
-                        tuple(int(x) for x in row)
-                        for row in residual_top_ids[0, tail_start_row:]
-                        .detach()
-                        .cpu()
-                        .tolist()
-                    ),
-                    top_probabilities_by_block=tuple(
-                        tuple(float(x) for x in row)
-                        for row in residual_top_probs[0, tail_start_row:]
-                        .detach()
-                        .cpu()
-                        .tolist()
-                    ),
-                    start_position=int(start),
-                    first_block_index=int(acceptance_length + 2),
-                )
+            if draft_logits is not None and sampled_draft_ids is not None:
+                tail_logits = draft_logits[:, tail_start_row:, :]
+                if tail_logits.shape[1] > 0:
+                    draft_tail_probs = torch.softmax(tail_logits, dim=-1)
+                    sampled_tail_ids = sampled_draft_ids[:, tail_start_row:]
+                    sampled_tail_probs = torch.gather(
+                        draft_tail_probs, -1, sampled_tail_ids.unsqueeze(-1)
+                    ).squeeze(-1)
+                    for offset, probability in enumerate(
+                        sampled_tail_probs[0].detach().cpu().tolist()
+                    ):
+                        block_probabilities[tail_start_row + offset + 1] = float(
+                            probability
+                        )
+                    topk = min(
+                        int(residual_tree_width), int(draft_tail_probs.shape[-1])
+                    )
+                    residual_top_probs, residual_top_ids = torch.topk(
+                        draft_tail_probs, k=topk, dim=-1
+                    )
+                    residual_candidate_groups = build_residual_candidate_groups(
+                        top_token_ids_by_block=tuple(
+                            tuple(int(x) for x in row)
+                            for row in residual_top_ids[0].detach().cpu().tolist()
+                        ),
+                        top_probabilities_by_block=tuple(
+                            tuple(float(x) for x in row)
+                            for row in residual_top_probs[0].detach().cpu().tolist()
+                        ),
+                        start_position=int(start),
+                        first_block_index=int(acceptance_length + 2),
+                    )
             try:
                 opportunity = build_residual_opportunity(
                     block_token_ids=tuple(
@@ -299,10 +306,29 @@ def dflash_generate(
             except NoResidualOpportunity:
                 opportunity = None
 
+            gate_record = None
             if opportunity is not None:
-                residual_attempts.append(opportunity)
-                residual_gate_records.append(
-                    {
+                residual_attempt_count += 1
+                if not opportunity.should_run:
+                    residual_gate_off_count += 1
+                residual_estimated_gain_sum += float(
+                    opportunity.estimated_residual_gain
+                )
+                residual_effective_gain_sum += float(
+                    opportunity.gate.effective_estimated_residual_gain
+                )
+                residual_baseline_throughput_sum += float(
+                    opportunity.gate.baseline_throughput
+                )
+                residual_predicted_throughput_sum += float(
+                    opportunity.gate.predicted_residual_throughput
+                )
+                residual_target_seconds_sum += float(
+                    opportunity.gate.residual_target_seconds
+                )
+                if residual_collect_diagnostics:
+                    residual_attempts.append(opportunity)
+                    gate_record = {
                         "start": int(start),
                         "acceptance_length": int(acceptance_length),
                         "current_accepted": int(acceptance_length + 1),
@@ -320,7 +346,7 @@ def dflash_generate(
                         ),
                         "should_run": bool(opportunity.should_run),
                         "reason": opportunity.gate.reason,
-                        "tree_nodes": int(opportunity.tree_nodes),
+                        "tree_nodes": 0,
                         "draft_seconds": float(opportunity.gate.draft_seconds),
                         "target_seconds": float(opportunity.gate.target_seconds),
                         "residual_target_seconds": float(
@@ -333,17 +359,30 @@ def dflash_generate(
                         "residual_min_margin": float(
                             opportunity.gate.min_throughput_margin
                         ),
+                        "eal_estimator": "depth_mass",
                     }
-                )
+                    residual_gate_records.append(gate_record)
 
             if opportunity is not None and opportunity.should_run:
                 mismatch_block_index = acceptance_length + 1
                 residual_tail = block_output_ids[:, mismatch_block_index + 1 :]
+                residual_tree = (
+                    build_residual_ddtree(
+                        opportunity.path.anchor,
+                        residual_candidate_groups,
+                        budget=residual_budget,
+                    )
+                    if residual_candidate_groups
+                    else opportunity.residual_tree
+                )
                 tree_nodes = (
-                    linearize_residual_tree(opportunity.residual_tree)
-                    if opportunity.residual_tree is not None
+                    linearize_residual_tree(residual_tree)
+                    if residual_tree is not None
                     else ()
                 )
+                residual_tree_node_sum += len(tree_nodes)
+                if gate_record is not None:
+                    gate_record["tree_nodes"] = len(tree_nodes)
                 if tree_nodes:
                     residual_ran = True
                     residual_runs += 1
@@ -392,22 +431,30 @@ def dflash_generate(
                         ),
                     )
                     for edge_record in tree_walk.edge_records:
-                        residual_edge_records.append(
-                            {
-                                **edge_record,
-                                "start": int(start),
-                                "acceptance_length": int(acceptance_length),
-                                "current_accepted": int(acceptance_length + 1),
-                                "residual_run_index": int(residual_runs),
-                                "estimated_residual_gain": float(
-                                    opportunity.estimated_residual_gain
-                                ),
-                                "effective_estimated_residual_gain": float(
-                                    opportunity.gate.effective_estimated_residual_gain
-                                ),
-                                "verification_mode": "tree",
-                            }
+                        residual_edge_count += 1
+                        residual_edge_accepted_count += int(
+                            bool(edge_record.get("accepted", False))
                         )
+                        residual_edge_probability_sum += float(
+                            edge_record.get("edge_probability", 0.0)
+                        )
+                        if residual_collect_diagnostics:
+                            residual_edge_records.append(
+                                {
+                                    **edge_record,
+                                    "start": int(start),
+                                    "acceptance_length": int(acceptance_length),
+                                    "current_accepted": int(acceptance_length + 1),
+                                    "residual_run_index": int(residual_runs),
+                                    "estimated_residual_gain": float(
+                                        opportunity.estimated_residual_gain
+                                    ),
+                                    "effective_estimated_residual_gain": float(
+                                        opportunity.gate.effective_estimated_residual_gain
+                                    ),
+                                    "verification_mode": "tree",
+                                }
+                            )
 
                     accepted_indices = [
                         0,
@@ -479,22 +526,30 @@ def dflash_generate(
                         opportunity.path,
                         residual_acceptance_length=int(residual_acceptance_length),
                     ):
-                        residual_edge_records.append(
-                            {
-                                **edge_record,
-                                "start": int(start),
-                                "acceptance_length": int(acceptance_length),
-                                "current_accepted": int(acceptance_length + 1),
-                                "residual_run_index": int(residual_runs),
-                                "estimated_residual_gain": float(
-                                    opportunity.estimated_residual_gain
-                                ),
-                                "effective_estimated_residual_gain": float(
-                                    opportunity.gate.effective_estimated_residual_gain
-                                ),
-                                "verification_mode": "path",
-                            }
+                        residual_edge_count += 1
+                        residual_edge_accepted_count += int(
+                            bool(edge_record.get("accepted", False))
                         )
+                        residual_edge_probability_sum += float(
+                            edge_record.get("edge_probability", 0.0)
+                        )
+                        if residual_collect_diagnostics:
+                            residual_edge_records.append(
+                                {
+                                    **edge_record,
+                                    "start": int(start),
+                                    "acceptance_length": int(acceptance_length),
+                                    "current_accepted": int(acceptance_length + 1),
+                                    "residual_run_index": int(residual_runs),
+                                    "estimated_residual_gain": float(
+                                        opportunity.estimated_residual_gain
+                                    ),
+                                    "effective_estimated_residual_gain": float(
+                                        opportunity.gate.effective_estimated_residual_gain
+                                    ),
+                                    "verification_mode": "path",
+                                }
+                            )
                     residual_start = start + acceptance_length + 1
                     output_ids[
                         :,
@@ -572,6 +627,17 @@ def dflash_generate(
         residual_gate_records=residual_gate_records,
         residual_edge_records=residual_edge_records,
         residual_runs=residual_runs,
+        residual_attempt_count=residual_attempt_count,
+        residual_gate_off_count=residual_gate_off_count,
+        residual_edge_count=residual_edge_count,
+        residual_edge_accepted_count=residual_edge_accepted_count,
+        residual_edge_probability_sum=residual_edge_probability_sum,
+        residual_estimated_gain_sum=residual_estimated_gain_sum,
+        residual_effective_gain_sum=residual_effective_gain_sum,
+        residual_baseline_throughput_sum=residual_baseline_throughput_sum,
+        residual_predicted_throughput_sum=residual_predicted_throughput_sum,
+        residual_target_seconds_sum=residual_target_seconds_sum,
+        residual_tree_node_sum=residual_tree_node_sum,
     )
 
 

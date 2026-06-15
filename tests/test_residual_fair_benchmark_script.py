@@ -73,3 +73,5 @@ def test_fair_benchmark_logs_gate_diagnostics() -> None:
     assert "residual_gain_scale" in source
     assert "residual_min_gain" in source
     assert "residual_min_margin" in source
+    assert "--residual-diagnostics" in source
+    assert "residual_collect_diagnostics" in source

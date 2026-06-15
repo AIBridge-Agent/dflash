@@ -10,7 +10,7 @@ from .residual_gating import ResidualGateDecision, decide_residual_gate
 from .residual_reroot import extract_residual_path
 from .residual_surrogate import (
     ResidualDDTree,
-    build_residual_ddtree,
+    estimate_depth_mass_eal,
     estimate_residual_gain,
 )
 from .residual_types import CandidateSource, ResidualCandidate, ResidualPath
@@ -131,10 +131,7 @@ def build_residual_opportunity(
     )
     residual_tree = None
     if residual_candidate_groups:
-        residual_tree = build_residual_ddtree(
-            path.anchor, residual_candidate_groups, budget=residual_budget
-        )
-        estimated_gain = residual_tree.expected_accept_length
+        estimated_gain = estimate_depth_mass_eal(residual_candidate_groups)
     else:
         estimated_gain = estimate_residual_gain([path], budget=residual_budget)
 
