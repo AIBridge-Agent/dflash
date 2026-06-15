@@ -21,6 +21,7 @@ from transformers import DynamicCache
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.cache_utils import Cache
 
+from .residual_cache import compact_dynamic_cache
 from .residual_errors import NoResidualOpportunity
 from .residual_generate import (
     build_residual_candidate_groups,
@@ -408,35 +409,25 @@ def dflash_generate(
                             }
                         )
 
-                    accepted_token_ids = [
-                        node.token_id for node in tree_walk.accepted_nodes
+                    accepted_indices = [
+                        0,
+                        *(node.flat_index for node in tree_walk.accepted_nodes),
                     ]
+                    accepted_index_tensor = torch.tensor(
+                        accepted_indices, dtype=torch.long, device=tree_ids.device
+                    )
+                    accepted_tokens = tree_ids.index_select(1, accepted_index_tensor)
                     residual_start = anchor_position
-                    if accepted_token_ids:
-                        output_ids[
-                            :,
-                            residual_start + 1 : residual_start
-                            + 1
-                            + len(accepted_token_ids),
-                        ] = torch.tensor(
-                            accepted_token_ids,
-                            dtype=torch.long,
-                            device=target.device,
-                        ).unsqueeze(0)
-                    mismatch_position = residual_start + len(accepted_token_ids) + 1
+                    output_ids[
+                        :, residual_start : residual_start + accepted_tokens.shape[1]
+                    ] = accepted_tokens
+                    mismatch_position = residual_start + accepted_tokens.shape[1]
                     output_ids[:, mismatch_position] = tree_walk.mismatch_token_id
 
-                    past_key_values_target.crop(anchor_position)
-                    replay_ids = output_ids[:, residual_start:mismatch_position]
-                    replay_output = target(
-                        replay_ids,
-                        position_ids=position_ids[:, residual_start:mismatch_position],
-                        past_key_values=past_key_values_target,
-                        use_cache=True,
-                        output_hidden_states=block_size > 1,
+                    compact_dynamic_cache(
+                        past_key_values_target, anchor_position, accepted_indices
                     )
                     start = mismatch_position
-                    past_key_values_target.crop(start)
                     acceptance_lengths.append(
                         acceptance_length + tree_walk.accepted_count + 2
                     )
@@ -445,8 +436,8 @@ def dflash_generate(
                             output.hidden_states, model.target_layer_ids
                         )[:, : acceptance_length + 1, :]
                         residual_hidden = extract_context_feature(
-                            replay_output.hidden_states, model.target_layer_ids
-                        )
+                            tree_output.hidden_states, model.target_layer_ids
+                        ).index_select(1, accepted_index_tensor)
                         target_hidden = torch.cat(
                             [prefix_hidden, residual_hidden], dim=1
                         )
