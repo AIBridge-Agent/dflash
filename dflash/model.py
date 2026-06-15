@@ -74,14 +74,18 @@ def _cuda_time() -> float:
 
 
 def _tree_attention_mask(
-    parents: tuple[int | None, ...], *, past_length: int, device: torch.device
+    parents: tuple[int | None, ...],
+    *,
+    past_length: int,
+    device: torch.device,
+    dtype: torch.dtype,
 ) -> torch.Tensor:
     """Build an additive tree-attention mask for flattened residual DDTree nodes."""
 
     q_len = len(parents)
     kv_len = past_length + q_len
-    mask = torch.zeros((1, 1, q_len, kv_len), device=device, dtype=torch.float32)
-    blocked_value = -1.0e9
+    mask = torch.zeros((1, 1, q_len, kv_len), device=device, dtype=dtype)
+    blocked_value = -1.0e4
     for query_index in range(q_len):
         allowed = set()
         cursor: int | None = query_index
@@ -351,6 +355,7 @@ def dflash_generate(
                         device=target.device,
                     ).unsqueeze(0)
                     tree_parents = parent_indices(tree_nodes)
+                    tree_output_dtype = next(target.parameters()).dtype
                     tree_output = target(
                         tree_ids,
                         position_ids=tree_position_ids,
@@ -358,6 +363,7 @@ def dflash_generate(
                             tree_parents,
                             past_length=anchor_position,
                             device=target.device,
+                            dtype=tree_output_dtype,
                         ),
                         past_key_values=past_key_values_target,
                         use_cache=True,
