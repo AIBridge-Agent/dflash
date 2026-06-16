@@ -89,6 +89,23 @@ def test_top1_path_eal_uses_only_best_single_sequence() -> None:
     assert estimate_top1_path_eal((depth1, depth2)) == pytest.approx(1.6)
 
 
+def test_top1_path_eal_scales_edges_not_bonus_token() -> None:
+    depth1 = (ResidualCandidate(1, 11, 0.8, CandidateSource.DRAFT_TAIL, 1),)
+    depth2 = (ResidualCandidate(2, 12, 0.5, CandidateSource.DRAFT_TAIL, 2),)
+
+    # EAL = 1 bonus token + (0.5 * 0.8) + (0.5 * 0.8) * (0.5 * 0.5).
+    assert estimate_top1_path_eal(
+        (depth1, depth2), edge_probability_scale=0.5
+    ) == pytest.approx(1.5)
+
+
+def test_top1_path_eal_rejects_negative_edge_scale() -> None:
+    depth1 = (ResidualCandidate(1, 11, 0.8, CandidateSource.DRAFT_TAIL, 1),)
+
+    with pytest.raises(ValueError):
+        estimate_top1_path_eal((depth1,), edge_probability_scale=-0.1)
+
+
 def test_residual_ddtree_expected_accept_length_sums_tree_prefix_nodes() -> None:
     anchor = VerificationAnchor(token_id=99, position=10)
     depth1 = (

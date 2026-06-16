@@ -123,6 +123,7 @@ def dflash_generate(
     residual_gain_scale: float = 1.0,
     residual_min_gain: float = 0.0,
     residual_min_margin: float = 0.2,
+    residual_edge_probability_scale: float = 1.0,
     residual_draft_seconds: float | None = None,
     residual_target_seconds: float | None = None,
     residual_collect_diagnostics: bool = True,
@@ -381,7 +382,8 @@ def dflash_generate(
                 ]
                 if enable_residual and remaining_candidate_groups:
                     residual_estimated_gain = estimate_top1_path_eal(
-                        remaining_candidate_groups
+                        remaining_candidate_groups,
+                        edge_probability_scale=residual_edge_probability_scale,
                     )
                     residual_target_seconds_estimate = (
                         float(residual_target_seconds)
@@ -444,6 +446,9 @@ def dflash_generate(
                                 residual_gate.min_throughput_margin
                             ),
                             "eal_estimator": "top1_path",
+                            "residual_edge_probability_scale": float(
+                                residual_edge_probability_scale
+                            ),
                             "verification_mode": "residual_gate",
                         }
                         residual_gate_records.append(residual_gate_record)
@@ -691,6 +696,7 @@ def dflash_generate(
                     residual_gain_scale=residual_gain_scale,
                     residual_min_gain=residual_min_gain,
                     residual_min_margin=residual_min_margin,
+                    residual_edge_probability_scale=residual_edge_probability_scale,
                 )
             except NoResidualOpportunity:
                 opportunity = None
@@ -749,6 +755,9 @@ def dflash_generate(
                             opportunity.gate.min_throughput_margin
                         ),
                         "eal_estimator": "top1_path",
+                        "residual_edge_probability_scale": float(
+                            residual_edge_probability_scale
+                        ),
                     }
                     residual_gate_records.append(gate_record)
 

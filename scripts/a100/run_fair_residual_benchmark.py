@@ -196,6 +196,7 @@ def run_policy(
     residual_gain_scale: float,
     residual_min_gain: float,
     residual_min_margin: float,
+    residual_edge_probability_scale: float,
     residual_draft_seconds: float | None,
     residual_target_seconds: float | None,
     residual_collect_diagnostics: bool,
@@ -220,6 +221,7 @@ def run_policy(
         residual_gain_scale=residual_gain_scale,
         residual_min_gain=residual_min_gain,
         residual_min_margin=residual_min_margin,
+        residual_edge_probability_scale=residual_edge_probability_scale,
         residual_draft_seconds=residual_draft_seconds,
         residual_target_seconds=residual_target_seconds,
         residual_collect_diagnostics=residual_collect_diagnostics,
@@ -344,6 +346,7 @@ def run_policy(
         "residual_gain_scale": residual_gain_scale,
         "residual_min_gain": residual_min_gain,
         "residual_min_margin": residual_min_margin,
+        "residual_edge_probability_scale": residual_edge_probability_scale,
         "residual_draft_seconds": residual_draft_seconds,
         "residual_target_seconds": residual_target_seconds,
         "residual_collect_diagnostics": residual_collect_diagnostics,
@@ -494,6 +497,7 @@ def main() -> None:
     parser.add_argument("--residual-gain-scale", type=float, default=1.0)
     parser.add_argument("--residual-min-gain", type=float, default=0.0)
     parser.add_argument("--residual-min-margin", type=float, default=0.2)
+    parser.add_argument("--residual-edge-probability-scale", type=float, default=1.0)
     parser.add_argument("--residual-draft-seconds", type=float, default=None)
     parser.add_argument("--residual-target-seconds", type=float, default=None)
     parser.add_argument(
@@ -568,6 +572,7 @@ def main() -> None:
                     residual_gain_scale=args.residual_gain_scale,
                     residual_min_gain=args.residual_min_gain,
                     residual_min_margin=args.residual_min_margin,
+                    residual_edge_probability_scale=args.residual_edge_probability_scale,
                     residual_draft_seconds=args.residual_draft_seconds,
                     residual_target_seconds=args.residual_target_seconds,
                     residual_collect_diagnostics=args.residual_diagnostics,
@@ -584,6 +589,7 @@ def main() -> None:
                         "residual_gain_scale": args.residual_gain_scale,
                         "residual_min_gain": args.residual_min_gain,
                         "residual_min_margin": args.residual_min_margin,
+                        "residual_edge_probability_scale": args.residual_edge_probability_scale,
                         "residual_draft_seconds": args.residual_draft_seconds,
                         "residual_target_seconds": args.residual_target_seconds,
                         "fairness": {

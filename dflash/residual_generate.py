@@ -114,6 +114,7 @@ def build_residual_opportunity(
     residual_gain_scale: float = 1.0,
     residual_min_gain: float = 0.0,
     residual_min_margin: float = 0.0,
+    residual_edge_probability_scale: float = 1.0,
 ) -> ResidualOpportunity:
     """Build and gate a residual opportunity without invoking the drafter.
 
@@ -132,7 +133,10 @@ def build_residual_opportunity(
     )
     residual_tree = None
     if residual_candidate_groups:
-        estimated_gain = estimate_top1_path_eal(residual_candidate_groups)
+        estimated_gain = estimate_top1_path_eal(
+            residual_candidate_groups,
+            edge_probability_scale=residual_edge_probability_scale,
+        )
     else:
         estimated_gain = estimate_residual_gain([path], budget=residual_budget)
 

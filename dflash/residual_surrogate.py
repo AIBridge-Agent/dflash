@@ -63,7 +63,9 @@ def estimate_depth_mass_eal(candidate_groups: Sequence[Sequence]) -> float:
     return expected_length
 
 
-def estimate_top1_path_eal(candidate_groups: Sequence[Sequence]) -> float:
+def estimate_top1_path_eal(
+    candidate_groups: Sequence[Sequence], *, edge_probability_scale: float = 1.0
+) -> float:
     """Cheap residual EAL estimate from the top-1 single residual sequence.
 
     The residual gate should estimate the benefit of reusing the most likely
@@ -71,8 +73,13 @@ def estimate_top1_path_eal(candidate_groups: Sequence[Sequence]) -> float:
     still spend a DDTree budget. For each residual-tail depth d, p_d is the
     largest available candidate probability at that depth. The estimate includes
     the verifier bonus token: 1 + p_1 + p_1 p_2 + ... .
+
+    `edge_probability_scale` calibrates after-reject draft probabilities without
+    discounting the verifier bonus token.
     """
 
+    if edge_probability_scale < 0:
+        raise ValueError("edge_probability_scale must be non-negative")
     if not candidate_groups:
         return 0.0
 
@@ -82,6 +89,7 @@ def estimate_top1_path_eal(candidate_groups: Sequence[Sequence]) -> float:
         if not group:
             break
         top1_probability = max(float(candidate.probability) for candidate in group)
+        top1_probability = min(1.0, top1_probability * edge_probability_scale)
         running_product *= top1_probability
         expected_length += running_product
     return expected_length
@@ -106,9 +114,7 @@ def build_residual_ddtree(
     if not candidate_groups:
         return ResidualDDTree(nodes=())
 
-    frontier: list[
-        tuple[float, tuple[int, ...], tuple[int, ...], int, int, tuple]
-    ] = []
+    frontier: list[tuple[float, tuple[int, ...], tuple[int, ...], int, int, tuple]] = []
     insertion_order = 0
     for candidate in candidate_groups[0]:
         heapq.heappush(frontier, _frontier_item((candidate,), insertion_order))
