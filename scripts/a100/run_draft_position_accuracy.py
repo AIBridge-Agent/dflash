@@ -54,6 +54,15 @@ FULL_BALANCED_COUNTS = {
 }
 
 Bucket = dict[str, float | int]
+PROBABILITY_BIN_COUNT = 10
+
+
+def _probability_bin(probability: float) -> str:
+    clipped = min(max(float(probability), 0.0), 1.0)
+    index = min(int(clipped * PROBABILITY_BIN_COUNT), PROBABILITY_BIN_COUNT - 1)
+    lower = index / PROBABILITY_BIN_COUNT
+    upper = (index + 1) / PROBABILITY_BIN_COUNT
+    return f"{lower:.1f}-{upper:.1f}"
 
 
 def _new_bucket() -> Bucket:
@@ -67,16 +76,22 @@ def _new_bucket() -> Bucket:
     }
 
 
-def _add_bucket(bucket: Bucket, *, comparable: bool, correct: bool, probability: float) -> None:
+def _add_bucket(
+    bucket: Bucket, *, comparable: bool, correct: bool, probability: float
+) -> None:
     bucket["attempts"] = int(bucket["attempts"]) + 1
     bucket["prob_sum"] = float(bucket["prob_sum"]) + float(probability)
     if comparable:
         bucket["comparable"] = int(bucket["comparable"]) + 1
         if correct:
             bucket["correct"] = int(bucket["correct"]) + 1
-            bucket["correct_prob_sum"] = float(bucket["correct_prob_sum"]) + float(probability)
+            bucket["correct_prob_sum"] = float(bucket["correct_prob_sum"]) + float(
+                probability
+            )
         else:
-            bucket["incorrect_prob_sum"] = float(bucket["incorrect_prob_sum"]) + float(probability)
+            bucket["incorrect_prob_sum"] = float(bucket["incorrect_prob_sum"]) + float(
+                probability
+            )
 
 
 def _merge_bucket(dst: Bucket, src: Bucket) -> None:
@@ -126,6 +141,10 @@ def _empty_stats() -> dict[str, Any]:
         "by_reject_offset": defaultdict(_new_bucket),
         "by_distance_after_reject": defaultdict(_new_bucket),
         "by_acceptance_length": defaultdict(_new_bucket),
+        "by_probability_bin": defaultdict(_new_bucket),
+        "accepted_prefix_by_probability_bin": defaultdict(_new_bucket),
+        "first_reject_by_probability_bin": defaultdict(_new_bucket),
+        "after_reject_by_probability_bin": defaultdict(_new_bucket),
         "first_reject_offset_hist": defaultdict(int),
         "acceptance_length_hist": defaultdict(int),
         "decode_seconds": [],
@@ -152,7 +171,12 @@ def _record_attempt(
     else:
         phase = "after_reject"
 
-    _add_bucket(stats["overall"], comparable=comparable, correct=correct, probability=probability)
+    _add_bucket(
+        stats["overall"],
+        comparable=comparable,
+        correct=correct,
+        probability=probability,
+    )
     _add_bucket(
         stats["by_phase"][phase],
         comparable=comparable,
@@ -167,6 +191,19 @@ def _record_attempt(
     )
     _add_bucket(
         stats["by_acceptance_length"][str(acceptance_length)],
+        comparable=comparable,
+        correct=correct,
+        probability=probability,
+    )
+    probability_bin = _probability_bin(probability)
+    _add_bucket(
+        stats["by_probability_bin"][probability_bin],
+        comparable=comparable,
+        correct=correct,
+        probability=probability,
+    )
+    _add_bucket(
+        stats[f"{phase}_by_probability_bin"][probability_bin],
         comparable=comparable,
         correct=correct,
         probability=probability,
@@ -195,6 +232,10 @@ def _merge_stats(dst: dict[str, Any], src: dict[str, Any]) -> None:
         "by_reject_offset",
         "by_distance_after_reject",
         "by_acceptance_length",
+        "by_probability_bin",
+        "accepted_prefix_by_probability_bin",
+        "first_reject_by_probability_bin",
+        "after_reject_by_probability_bin",
     ):
         for key, bucket in src[group_name].items():
             _merge_bucket(dst[group_name][key], bucket)
@@ -219,15 +260,36 @@ def _stats_view(stats: dict[str, Any]) -> dict[str, Any]:
         "by_reject_offset": _serialise_group(stats["by_reject_offset"]),
         "by_distance_after_reject": _serialise_group(stats["by_distance_after_reject"]),
         "by_acceptance_length": _serialise_group(stats["by_acceptance_length"]),
-        "first_reject_offset_hist": dict(sorted(stats["first_reject_offset_hist"].items(), key=lambda item: _sort_key(item[0]))),
-        "acceptance_length_hist": dict(sorted(stats["acceptance_length_hist"].items(), key=lambda item: _sort_key(item[0]))),
+        "by_probability_bin": _serialise_group(stats["by_probability_bin"]),
+        "accepted_prefix_by_probability_bin": _serialise_group(
+            stats["accepted_prefix_by_probability_bin"]
+        ),
+        "first_reject_by_probability_bin": _serialise_group(
+            stats["first_reject_by_probability_bin"]
+        ),
+        "after_reject_by_probability_bin": _serialise_group(
+            stats["after_reject_by_probability_bin"]
+        ),
+        "first_reject_offset_hist": dict(
+            sorted(
+                stats["first_reject_offset_hist"].items(),
+                key=lambda item: _sort_key(item[0]),
+            )
+        ),
+        "acceptance_length_hist": dict(
+            sorted(
+                stats["acceptance_length_hist"].items(),
+                key=lambda item: _sort_key(item[0]),
+            )
+        ),
         "num_prompts": len(output_tokens),
         "total_output_tokens": total_tokens,
         "total_decode_seconds": total_decode,
         "aggregate_tps": total_tokens / total_decode if total_decode else 0.0,
         "mean_tpot_ms": (
             statistics.fmean(
-                sec / max(tok, 1) for sec, tok in zip(decode_seconds, output_tokens, strict=True)
+                sec / max(tok, 1)
+                for sec, tok in zip(decode_seconds, output_tokens, strict=True)
             )
             * 1000.0
             if output_tokens
@@ -259,7 +321,9 @@ def collect_prompt_accuracy(
     )
     position_ids = torch.arange(output_ids.shape[1], device=target.device).unsqueeze(0)
     stop_token_ids_tensor = (
-        None if stop_token_ids is None else torch.tensor(stop_token_ids, device=target.device)
+        None
+        if stop_token_ids is None
+        else torch.tensor(stop_token_ids, device=target.device)
     )
     past_key_values_target = DynamicCache()
     past_key_values_draft = DynamicCache()
@@ -280,7 +344,9 @@ def collect_prompt_accuracy(
     output_ids[:, num_input_tokens : num_input_tokens + 1] = sample(
         target_prefill.logits, temperature
     )
-    target_hidden = extract_context_feature(target_prefill.hidden_states, model.target_layer_ids)
+    target_hidden = extract_context_feature(
+        target_prefill.hidden_states, model.target_layer_ids
+    )
 
     decode_start = time.perf_counter()
     start = num_input_tokens
@@ -334,8 +400,12 @@ def collect_prompt_accuracy(
                     "abs_pos": int(start + offset),
                     "offset": int(offset),
                     "acceptance_length": int(acceptance_length),
-                    "token_id": int(sampled_draft_ids[0, offset - 1].detach().cpu().item()),
-                    "probability": float(sampled_probs[0, offset - 1].detach().cpu().item()),
+                    "token_id": int(
+                        sampled_draft_ids[0, offset - 1].detach().cpu().item()
+                    ),
+                    "probability": float(
+                        sampled_probs[0, offset - 1].detach().cpu().item()
+                    ),
                 }
             )
 
@@ -363,7 +433,9 @@ def collect_prompt_accuracy(
             output_ids[0][num_input_tokens:], stop_token_ids_tensor
         ).nonzero(as_tuple=True)[0]
         if stop_token_indices.numel() > 0:
-            output_ids = output_ids[:, : num_input_tokens + int(stop_token_indices[0]) + 1]
+            output_ids = output_ids[
+                :, : num_input_tokens + int(stop_token_indices[0]) + 1
+            ]
 
     final_tokens = output_ids[0].detach().cpu().tolist()
     prompt_stats = _empty_stats()
